@@ -130,24 +130,32 @@ def normalize_district(text):
     prefixes = ["Г.", "ПГТ", "ПОС.", "ПОСЕЛОК", "С.", "СЕЛО", "УЛУС", "РАЙОН", "Р-Н"]
     for p in prefixes:
         text = re.sub(rf'\b{re.escape(p)}\b', ' ', text)
+    
+    # Allow alphanumeric, spaces and dashes for complex names
+    text = re.sub(r'[^А-Я0-9\s-]', '', text)
     text = text.replace("-", " ")
-    text = re.sub(r'[^А-Я0-9\s]', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    return re.sub(r'\s+', ' ', text).strip()
 
 def normalize_address(text):
     if not text:
         return ""
     text = text.lower()
+    # Remove apartment info
     text = re.sub(r'\s*(кв|квартира)\s*\d+.*$', '', text)
+    
     replacements = {
         "улица": "ул", "переулок": "пер", "проспект": "пр", "бульвар": "б-р",
         "бул": "б-р", "шоссе": "ш", "проезд": "пр-д", "пр": "пр-д",
         "тупик": "туп", "набережная": "наб", "площадь": "пл", "тракт": "тр",
-        ".": " ", ",": " ",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
+    
+    # IMPORTANT: Preserve slashes / and dashes - but remove dots and commas
+    text = text.replace(".", " ").replace(",", " ")
+    # Keep only letters, numbers, spaces, slashes and dashes
+    text = re.sub(r'[^а-я0-9\s\/-]', '', text)
+    
     return re.sub(r'\s+', ' ', text).strip()
 
 def parse_russian_date(date_str):
