@@ -57,12 +57,26 @@ async def start_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Давайте настроим ваш адрес. \n\n"
             "Шаг 1: Введите название вашего района.\n"
-            "Примеры: Якутск, Хангаласский, Намский, Мирнинский, пгт Жатай"
+            "Примеры: Намский, Хангаласский, Мирнинский.\n\n"
+            "Если вы в Якутске, можете просто сразу ввести вашу улицу и номер дома."
         )
     return SET_DISTRICT
 
 async def process_district(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    district = normalize_district(update.message.text)
+    text = update.message.text
+    # Simple check: if it looks like a house address (has digits), default to YAKUTSK
+    if any(char.isdigit() for char in text):
+        district = "ЯКУТСК"
+        street = text
+        database.save_user_preference(update.effective_chat.id, district=district, street=street)
+        await update.message.reply_text(
+            f"✅ Понял! Адрес: {street}, Район: {district}.\n\n"
+            "Теперь я буду присылать вам уведомления о плановых работах в 21:00.",
+            reply_markup=get_main_keyboard()
+        )
+        return ConversationHandler.END
+    
+    district = normalize_district(text)
     context.user_data['temp_district'] = district
     await update.message.reply_text(
         f"Район «{district}» принят.\n\n"
@@ -189,17 +203,20 @@ async def check_updates(application, target_chat_id=None):
         for s in schedules:
             if parse_russian_date(s['date']) and parse_russian_date(s['date']) < today: continue
             if norm_user_district in normalize_district(s['district']):
-                norm_schedule_addr = normalize_address(s['addresses'])
-                if core_name in norm_schedule_addr:
-                    if house_num:
-                        if re.search(r'\b' + re.escape(house_num) + r'\b', norm_schedule_addr): matches.append(s)
-                        range_match = re.search(r'(\d+)\s*[–-]\s*(\d+)', norm_schedule_addr)
-                        if range_match:
-                            try:
-                                clean_h = int(re.sub(r'\D', '', house_num))
-                                if int(range_match.group(1)) <= clean_h <= int(range_match.group(2)): matches.append(s)
-                            except: pass
-                    else: matches.append(s)
+                # Split by comma to handle lists of addresses
+                schedule_address_parts = s['addresses'].split(',')
+                for part in schedule_address_parts:
+                    norm_schedule_addr = normalize_address(part)
+                    if core_name in norm_schedule_addr:
+                        if house_num:
+                            if re.search(r'\b' + re.escape(house_num) + r'\b', norm_schedule_addr): matches.append(s); break
+                            range_match = re.search(r'(\d+)\s*[–-]\s*(\d+)', norm_schedule_addr)
+                            if range_match:
+                                try:
+                                    clean_h = int(re.sub(r'\D', '', house_num))
+                                    if int(range_match.group(1)) <= clean_h <= int(range_match.group(2)): matches.append(s); break
+                                except: pass
+                        else: matches.append(s); break
         
         unique_matches = []
         seen = set()
@@ -212,7 +229,8 @@ async def check_updates(application, target_chat_id=None):
             for m in unique_matches: msg += f"📅 *Дата:* {m['date']}\n🕒 *Время:* {m['time']}\n📍 *Адреса:* {m['addresses']}\n🛠 *Причина:* {m['reason']}\n\n"
             try: await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
             except: pass
-        elif target_chat_id: await application.bot.send_message(chat_id=chat_id, text="✅ Работ не найдено.")
+        elif target_chat_id: 
+            await application.bot.send_message(chat_id=chat_id, text="✅ Работ не найдено.")
 
 async def scheduler_task(application):
     while True:
