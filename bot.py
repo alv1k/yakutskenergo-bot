@@ -139,7 +139,6 @@ def normalize_district(text):
     prefixes = ["Г.", "ПГТ", "ПОС.", "ПОСЕЛОК", "С.", "СЕЛО", "УЛУС", "РАЙОН", "Р-Н"]
     for p in prefixes: text = re.sub(rf'\b{re.escape(p)}\b', ' ', text)
     text = re.sub(r'[^А-Я0-9\s-]', '', text)
-    text = text.replace("-", " ")
     return re.sub(r'\s+', ' ', text).strip()
 
 def normalize_address(text):
@@ -155,7 +154,7 @@ def normalize_address(text):
     for old, new in replacements.items(): text = text.replace(old, new)
     text = text.replace(".", " ").replace(",", " ")
     text = re.sub(r'\b(дом|д|уч|участка)\b', ' ', text)
-    text = re.sub(r'[^а-я0-9\s\/-]', '', text)
+    text = re.sub(r'[^а-я0-9\s\/\-–]', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def parse_russian_date(date_str):
@@ -210,11 +209,14 @@ async def check_updates(application, target_chat_id=None):
                     if core_name in norm_schedule_addr:
                         if house_num:
                             if re.search(r'\b' + re.escape(house_num) + r'\b', norm_schedule_addr): matches.append(s); break
-                            range_match = re.search(r'(\d+)\s*[–-]\s*(\d+)', norm_schedule_addr)
+                            range_match = re.search(r'(\d+)\s*[\u2013-]\s*(\d+)', norm_schedule_addr)
                             if range_match:
                                 try:
-                                    clean_h = int(re.sub(r'\D', '', house_num))
-                                    if int(range_match.group(1)) <= clean_h <= int(range_match.group(2)): matches.append(s); break
+                                    # Extract integer part before non-digit (like / or корпусом)
+                                    clean_h_match = re.match(r'^\d+', house_num)
+                                    if clean_h_match:
+                                        clean_h = int(clean_h_match.group(0))
+                                        if int(range_match.group(1)) <= clean_h <= int(range_match.group(2)): matches.append(s); break
                                 except: pass
                         else: matches.append(s); break
         
@@ -226,7 +228,14 @@ async def check_updates(application, target_chat_id=None):
         
         if unique_matches:
             msg = "⚠️ *Внимание! Обнаружены плановые работы:*\n\n"
-            for m in unique_matches: msg += f"📅 *Дата:* {m['date']}\n🕒 *Время:* {m['time']}\n📍 *Адреса:* {m['addresses']}\n🛠 *Причина:* {m['reason']}\n\n"
+            for m in unique_matches:
+                # Find the matched address part again to show only relevant info
+                matched_part = ""
+                for part in m['addresses'].split(','):
+                    if core_name in normalize_address(part.lower()):
+                        matched_part = part.strip()
+                        break
+                msg += f"📅 *Дата:* {m['date']}\n🕒 *Время:* {m['time']}\n📍 *Адрес:* {matched_part}\n🛠 *Причина:* {m['reason']}\n\n"
             try: await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
             except: pass
         elif target_chat_id: 
