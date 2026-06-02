@@ -13,6 +13,13 @@ def init_db():
             last_notified TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sent_notifications (
+            chat_id INTEGER,
+            schedule_hash TEXT,
+            PRIMARY KEY (chat_id, schedule_hash)
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -45,6 +52,29 @@ def get_all_users():
     users = cursor.fetchall()
     conn.close()
     return users
+
+def is_notified(chat_id, schedule_hash):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM sent_notifications WHERE chat_id = ? AND schedule_hash = ?', (chat_id, schedule_hash))
+    res = cursor.fetchone()
+    conn.close()
+    return res is not None
+
+def mark_as_notified(chat_id, schedule_hash):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('INSERT INTO sent_notifications (chat_id, schedule_hash) VALUES (?, ?)', (chat_id, schedule_hash))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass
+    conn.close()
+
+def clear_old_notifications(days=7):
+    # Optional: cleanup old hashes to keep DB small
+    # For now we won't implement to keep it simple, but it's good practice
+    pass
 
 if __name__ == "__main__":
     init_db()

@@ -2,16 +2,18 @@ import logging
 import asyncio
 import re
 import os
+import hashlib
 from dotenv import load_dotenv
-from datetime import datetime, time, timedelta
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from datetime import datetime, time, timedelta, timezone
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, 
     CommandHandler, 
     ContextTypes, 
     MessageHandler, 
     filters, 
-    ConversationHandler
+    ConversationHandler,
+    CallbackQueryHandler
 )
 import database
 import scraper
@@ -27,7 +29,7 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
 # Conversation states
-SET_DISTRICT, SET_STREET = range(2)
+SET_STREET, CONFIRM_YAKUTSK, SET_DISTRICT = range(3)
 
 def get_main_keyboard():
     keyboard = [
@@ -46,40 +48,63 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def start_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pref = database.get_user_preference(update.effective_chat.id)
-    if pref and pref[0] and pref[1]:
-        await update.message.reply_text(
-            f"Ваш текущий адрес: {pref[0]}, {pref[1]}.\n"
-            "Давайте обновим его.\n\n"
-            "Шаг 1: Введите название вашего района (например: Якутск, Намский, пгт Жатай)."
-        )
-    else:
-        await update.message.reply_text(
-            "Давайте настроим ваш адрес. \n\n"
-            "Шаг 1: Введите название вашего района.\n"
-            "Примеры: Якутск, Хангаласский, Намский, Мирнинский, пгт Жатай"
-        )
-    return SET_DISTRICT
-
-async def process_district(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    district = normalize_district(update.message.text)
-    context.user_data['temp_district'] = district
     await update.message.reply_text(
-        f"Район «{district}» принят.\n\n"
-        "Шаг 2: Теперь введите вашу улицу и номер дома.\n"
-        "Примеры: Лермонтова 45, Лесная, переулок Сединский, Вилюйский тракт 4 км"
+        "Давайте настроим ваш адрес.\n\n"
+        "Шаг 1: Введите вашу улицу и номер дома.\n"
+        "Примеры: Лермонтова 45, переулок Сединский, Вилюйский тракт 4 км"
     )
     return SET_STREET
 
-async def process_street(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_street_first(update: Update, context: ContextTypes.DEFAULT_TYPE):
     street = update.message.text
-    district = context.user_data.get('temp_district')
+    context.user_data['temp_street'] = street
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Да, Якутск", callback_data="ykt_yes"),
+            InlineKeyboardButton("📍 Нет, другой район", callback_data="ykt_no")
+        ]
+    ]
+    await update.message.reply_text(
+        f"Вы ввели: {street}\n\nЭто адрес в г. Якутске?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return CONFIRM_YAKUTSK
+
+async def confirm_yakutsk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    street = context.user_data.get('temp_street')
+    
+    if query.data == "ykt_yes":
+        district = "ЯКУТСК"
+        database.save_user_preference(query.message.chat_id, district=district, street=street)
+        await query.edit_message_text(
+            f"✅ Готово! Адрес сохранен.\n"
+            f"Район: {district}\n"
+            f"Улица: {street}\n\n"
+            "Теперь я буду присылать вам уведомления дважды в день по Якутскому времени."
+        )
+        return ConversationHandler.END
+    else:
+        await query.edit_message_text(
+            f"Улица: {street}\n\n"
+            "Принято. Теперь введите название вашего района (улуса).\n"
+            "Примеры: Жатай, Намский, Хангаласский, Мирнинский"
+        )
+        return SET_DISTRICT
+
+async def process_district_after(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    district = normalize_district(update.message.text)
+    street = context.user_data.get('temp_street')
+    
     database.save_user_preference(update.effective_chat.id, district=district, street=street)
     await update.message.reply_text(
         f"✅ Готово! Адрес сохранен.\n"
         f"Район: {district}\n"
         f"Улица: {street}\n\n"
-        "Теперь я буду присылать вам уведомления о плановых работах в 21:00.",
+        "Теперь я буду присылать вам уведомления о плановых работах дважды в день по Якутску.",
         reply_markup=get_main_keyboard()
     )
     return ConversationHandler.END
@@ -144,8 +169,11 @@ def normalize_address(text):
     text = re.sub(r'[^а-я0-9\s\/-]', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
-def parse_russian_date(date_str):
+def parse_russian_date(date_str, ref_date=None):
     if not date_str: return None
+    if not ref_date:
+        ykt_tz = timezone(timedelta(hours=9))
+        ref_date = datetime.now(ykt_tz)
     months = {
         'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4, 'мая': 5, 'июня': 6,
         'июля': 7, 'августа': 8, 'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12
@@ -159,15 +187,19 @@ def parse_russian_date(date_str):
         else: day, month_name = int(match.group(1)), match.group(2).lower()
         month = months.get(month_name)
         if not month: return None
-        now = datetime.now()
-        year = now.year + 1 if now.month == 12 and month == 1 else now.year
+        year = ref_date.year + 1 if ref_date.month == 12 and month == 1 else ref_date.year
         return datetime(year, month, day).date()
     except: return None
 
-async def check_updates(application, target_chat_id=None):
-    logging.info("Checking updates...")
+async def check_updates(application, target_chat_id=None, force_date=None, is_manual=False):
+    logging.info(f"Checking updates (force_date={force_date}, is_manual={is_manual})...")
     schedules = await asyncio.to_thread(scraper.get_all_recent_schedules)
-    today = datetime.now().date()
+    
+    # Use Yakutsk time (UTC+9)
+    ykt_tz = timezone(timedelta(hours=9))
+    now_ykt = datetime.now(ykt_tz)
+    today = now_ykt.date()
+    
     users = [(target_chat_id, *database.get_user_preference(target_chat_id))] if target_chat_id else database.get_all_users()
     
     for chat_id, user_district, street in users:
@@ -187,40 +219,102 @@ async def check_updates(application, target_chat_id=None):
         if not core_name: core_name = street_name
 
         for s in schedules:
-            if parse_russian_date(s['date']) and parse_russian_date(s['date']) < today: continue
+            s_date = parse_russian_date(s['date'], ref_date=now_ykt)
+            if not s_date: continue
+            
+            # Filtering by date
+            if force_date:
+                if s_date != force_date: continue
+            else:
+                if s_date < today: continue
+
             if norm_user_district in normalize_district(s['district']):
                 norm_schedule_addr = normalize_address(s['addresses'])
                 if core_name in norm_schedule_addr:
+                    match_found = False
                     if house_num:
-                        if re.search(r'\b' + re.escape(house_num) + r'\b', norm_schedule_addr): matches.append(s)
-                        range_match = re.search(r'(\d+)\s*[–-]\s*(\d+)', norm_schedule_addr)
-                        if range_match:
-                            try:
-                                clean_h = int(re.sub(r'\D', '', house_num))
-                                if int(range_match.group(1)) <= clean_h <= int(range_match.group(2)): matches.append(s)
-                            except: pass
-                    else: matches.append(s)
+                        # 1. Direct match
+                        if re.search(r'\b' + re.escape(house_num) + r'\b', norm_schedule_addr): 
+                            match_found = True
+                        else:
+                            # 2. Range match
+                            range_match = re.search(r'(\d+)\s*[–-]\s*(\d+)', norm_schedule_addr)
+                            if range_match:
+                                try:
+                                    clean_h = int(re.sub(r'\D', '', house_num))
+                                    if int(range_match.group(1)) <= clean_h <= int(range_match.group(2)): 
+                                        match_found = True
+                                except: pass
+                            
+                            # 3. General street match (e.g. "частично" or no house numbers listed)
+                            if not match_found:
+                                # If the entry mentions the street but doesn't have house numbers (digits)
+                                # or explicitly mentions "partially"
+                                if "частич" in norm_schedule_addr or "полн" in norm_schedule_addr:
+                                    match_found = True
+                                elif not re.search(r'\d', norm_schedule_addr):
+                                    match_found = True
+                    else:
+                        match_found = True
+                    
+                    if match_found:
+                        # Duplicate prevention
+                        s_hash = hashlib.md5(f"{s['date']}{s['time']}{s['addresses']}{s['reason']}".encode()).hexdigest()
+                        if is_manual:
+                            matches.append((s, None)) # No marking for manual
+                        elif not database.is_notified(chat_id, s_hash):
+                            matches.append((s, s_hash))
         
-        unique_matches = []
-        seen = set()
-        for m in matches:
-            key = (m['date'], m['time'], m['addresses'])
-            if key not in seen: unique_matches.append(m); seen.add(key)
-        
-        if unique_matches:
+        if matches:
             msg = "⚠️ *Внимание! Обнаружены плановые работы:*\n\n"
-            for m in unique_matches: msg += f"📅 *Дата:* {m['date']}\n🕒 *Время:* {m['time']}\n📍 *Адреса:* {m['addresses']}\n🛠 *Причина:* {m['reason']}\n\n"
+            for m, s_hash in matches:
+                msg += f"📅 *Дата:* {m['date']}\n🕒 *Время:* {m['time']}\n📍 *Адреса:* {m['addresses']}\n🛠 *Причина:* {m['reason']}\n\n"
+                if s_hash: database.mark_as_notified(chat_id, s_hash)
+            
             try: await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
-            except: pass
-        elif target_chat_id: await application.bot.send_message(chat_id=chat_id, text="✅ Работ не найдено.")
+            except Exception as e: logging.error(f"Error sending message to {chat_id}: {e}")
+        elif target_chat_id:
+            await application.bot.send_message(chat_id=chat_id, text="✅ Работ не найдено.")
 
 async def scheduler_task(application):
+    ykt_tz = timezone(timedelta(hours=9))
     while True:
-        now = datetime.now()
-        target = datetime.combine(now.date(), time(21, 0))
-        if now >= target: target += timedelta(days=1)
-        await asyncio.sleep((target - now).total_seconds())
-        await check_updates(application)
+        now_ykt = datetime.now(ykt_tz)
+        
+        # Define target times in YKT
+        t9 = now_ykt.replace(hour=9, minute=0, second=0, microsecond=0)
+        t21 = now_ykt.replace(hour=21, minute=0, second=0, microsecond=0)
+        
+        targets = []
+        if now_ykt < t9:
+            targets.append((t9, "today"))
+        if now_ykt < t21:
+            targets.append((t21, "tomorrow"))
+        
+        # If both passed today, next is 9:00 tomorrow
+        if not targets:
+            next_t9 = t9 + timedelta(days=1)
+            targets.append((next_t9, "today"))
+            
+        # Sort targets to find the closest one
+        targets.sort()
+        target_time, mode = targets[0]
+        
+        wait_seconds = (target_time - now_ykt).total_seconds()
+        logging.info(f"Next run at {target_time} (YKT), mode={mode}. Waiting {wait_seconds}s")
+        
+        await asyncio.sleep(wait_seconds)
+        
+        # Refresh current time after sleep
+        now_ykt = datetime.now(ykt_tz)
+        today = now_ykt.date()
+        tomorrow = today + timedelta(days=1)
+        
+        target_date = today if mode == "today" else tomorrow
+        await check_updates(application, force_date=target_date)
+        
+        # Small sleep to prevent immediate re-triggering if sleep was slightly short
+        await asyncio.sleep(60)
 
 async def post_init(application):
     await application.bot.set_my_commands([("start", "Меню"), ("status", "Настройки"), ("check", "Проверить")])
@@ -231,8 +325,9 @@ if __name__ == '__main__':
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('📍 Настроить адрес'), start_setup)],
         states={
-            SET_DISTRICT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_district)],
-            SET_STREET: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_street)],
+            SET_STREET: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_street_first)],
+            CONFIRM_YAKUTSK: [CallbackQueryHandler(confirm_yakutsk)],
+            SET_DISTRICT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_district_after)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
