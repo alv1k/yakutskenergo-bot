@@ -88,7 +88,7 @@ async def confirm_yakutsk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Готово! Адрес сохранен.\n"
             f"Район: {district}\n"
             f"Улица: {street}\n\n"
-            "Теперь я буду присылать вам уведомления дважды в день по Якутскому времени."
+            "Теперь я буду присылать вам уведомления в 9:00 или в 21:00 по Якутскому времени."
         )
         return ConversationHandler.END
     else:
@@ -113,7 +113,7 @@ async def process_district_after(update: Update, context: ContextTypes.DEFAULT_T
         f"✅ Готово! Адрес сохранен.\n"
         f"Район: {district}\n"
         f"Улица: {street}\n\n"
-        "Теперь я буду присылать вам уведомления о плановых работах дважды в день по Якутску.",
+         "Теперь я буду присылать вам уведомления о плановых работах в 9:00 или в 21:00 по Якутску.",
         reply_markup=get_main_keyboard()
     )
     return ConversationHandler.END
