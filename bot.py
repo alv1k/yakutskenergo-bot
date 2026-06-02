@@ -135,7 +135,7 @@ async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     user_cooldowns[user_id] = now
     await update.message.reply_text("Запускаю проверку обновлений...")
-    await check_updates(context.application, target_chat_id=update.effective_chat.id)
+    await check_updates(context.application, target_chat_id=update.effective_chat.id, is_manual=True)
     await update.message.reply_text("Проверка завершена.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -150,7 +150,6 @@ def normalize_district(text):
     prefixes = ["Г.", "ПГТ", "ПОС.", "ПОСЕЛОК", "С.", "СЕЛО", "УЛУС", "РАЙОН", "Р-Н"]
     for p in prefixes: text = re.sub(rf'\b{re.escape(p)}\b', ' ', text)
     text = re.sub(r'[^А-Я0-9\s-]', '', text)
-    text = text.replace("-", " ")
     return re.sub(r'\s+', ' ', text).strip()
 
 def normalize_address(text):
@@ -166,7 +165,7 @@ def normalize_address(text):
     for old, new in replacements.items(): text = text.replace(old, new)
     text = text.replace(".", " ").replace(",", " ")
     text = re.sub(r'\b(дом|д|уч|участка)\b', ' ', text)
-    text = re.sub(r'[^а-я0-9\s\/-]', '', text)
+    text = re.sub(r'[^а-я0-9\s\/\-–]', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def parse_russian_date(date_str, ref_date=None):
