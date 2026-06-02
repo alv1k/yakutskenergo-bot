@@ -176,6 +176,24 @@ def normalize_district(text):
     text = re.sub(r'[^А-Я0-9\s-]', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
+def _expand_single_letter(token):
+    if re.fullmatch(r'[а-яёв]', token):
+        return r"[а-яёв]{2,}"
+    return re.escape(token)
+
+def build_street_pattern(core_name):
+    tokens = re.split(r'([\s-])', core_name)
+    pattern_parts = []
+    for i, tok in enumerate(tokens):
+        if i == 0 and tok == "":
+            continue
+        if tok in (" ", "-"):
+            pattern_parts.append(r"-?\s*")
+        else:
+            pattern_parts.append(_expand_single_letter(tok))
+    pattern = "".join(pattern_parts)
+    return re.compile(r'(?:^|[\s,/])' + pattern + r'(?:\s|$|[^\wа-яё])', re.IGNORECASE)
+
 def normalize_address(text):
     if not text: return ""
     text = text.lower()
@@ -230,7 +248,7 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
         matches = []
         norm_user_input = normalize_address(street)
         norm_user_district = normalize_district(user_district)
-        
+
         house_match = re.search(r'(\d+[\w\/-]*(\s*км)?)$', norm_user_input)
         if house_match:
             house_num = house_match.group(1).replace(" ", "")
@@ -238,13 +256,24 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
         else:
             house_num, street_name = None, norm_user_input
 
+        def parse_house(num):
+            if not num: return None, None
+            m = re.match(r'^(\d+)(?:/(.+))?$', num)
+            if m:
+                return int(m.group(1)), m.group(2)
+            digits = re.sub(r'\D', '', num)
+            return (int(digits) if digits else None), None
+
+        main_house, sub_house = parse_house(house_num)
+
         core_name = re.sub(r'\b(ул|пер|пр|ш|наб|пл|пр-д|туп|б-р|тр|мкр|корп|снт|сот|днт|гсп|км)\b', '', street_name).strip()
         if not core_name: core_name = street_name
+        street_pattern = build_street_pattern(core_name)
 
         for s in schedules:
             s_date = parse_russian_date(s['date'], ref_date=now_ykt)
             if not s_date: continue
-            
+
             # Filtering by date
             if force_date:
                 if s_date != force_date: continue
@@ -253,33 +282,36 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
 
             if norm_user_district in normalize_district(s['district']):
                 norm_schedule_addr = normalize_address(s['addresses'])
-                if core_name in norm_schedule_addr:
+                if street_pattern.search(norm_schedule_addr):
                     match_found = False
-                    if house_num:
-                        # 1. Direct match
-                        if re.search(r'\b' + re.escape(house_num) + r'\b', norm_schedule_addr): 
+                    if house_num and main_house is not None:
+                        # 1. Direct match — full house number including sub-building
+                        if re.search(r'\b' + re.escape(house_num) + r'\b', norm_schedule_addr):
                             match_found = True
                         else:
-                            # 2. Range match
+                            # 2. Range match — compare only main house number
                             range_match = re.search(r'(\d+)\s*[–-]\s*(\d+)', norm_schedule_addr)
                             if range_match:
                                 try:
-                                    clean_h = int(re.sub(r'\D', '', house_num))
-                                    if int(range_match.group(1)) <= clean_h <= int(range_match.group(2)): 
+                                    if int(range_match.group(1)) <= main_house <= int(range_match.group(2)):
                                         match_found = True
                                 except: pass
-                            
-                            # 3. General street match (e.g. "частично" or no house numbers listed)
+
+                            # 3. Sub-building match — e.g. user has "9" and schedule has "9/3а"
+                            if not match_found and sub_house is None:
+                                sub_match = re.search(r'\b' + str(main_house) + r'/\S+', norm_schedule_addr)
+                                if sub_match:
+                                    match_found = True
+
+                            # 4. General street match (no house numbers or partial/full)
                             if not match_found:
-                                # If the entry mentions the street but doesn't have house numbers (digits)
-                                # or explicitly mentions "partially"
                                 if "частич" in norm_schedule_addr or "полн" in norm_schedule_addr:
                                     match_found = True
                                 elif not re.search(r'\d', norm_schedule_addr):
                                     match_found = True
                     else:
                         match_found = True
-                    
+
                     if match_found:
                         # Duplicate prevention
                         s_hash = hashlib.md5(f"{s['date']}{s['time']}{s['addresses']}{s['reason']}".encode()).hexdigest()
