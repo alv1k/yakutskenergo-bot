@@ -10,7 +10,8 @@ def init_db():
             chat_id INTEGER PRIMARY KEY,
             district TEXT,
             street TEXT,
-            last_notified TEXT
+            last_notified TEXT,
+            bot_blocked INTEGER DEFAULT 0
         )
     ''')
     cursor.execute('''
@@ -65,7 +66,7 @@ def get_user_preference(chat_id):
 def get_all_users():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('SELECT chat_id, district, street FROM users')
+    cursor.execute('SELECT chat_id, district, street FROM users WHERE bot_blocked = 0')
     users = cursor.fetchall()
     conn.close()
     return users
@@ -86,6 +87,13 @@ def mark_as_notified(chat_id, schedule_hash):
         conn.commit()
     except sqlite3.IntegrityError:
         pass
+    conn.close()
+
+def set_blocked(chat_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE users SET bot_blocked = 1 WHERE chat_id = ?', (chat_id,))
+    conn.commit()
     conn.close()
 
 def clear_old_notifications(days=7):

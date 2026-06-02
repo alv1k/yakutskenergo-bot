@@ -57,8 +57,12 @@ async def start_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_street_first(update: Update, context: ContextTypes.DEFAULT_TYPE):
     street = update.message.text
-    context.user_data['temp_street'] = street
-    
+    valid, error_msg = validate_address_input(street, "Улица")
+    if not valid:
+        await update.message.reply_text(f"⚠️ {error_msg}")
+        return SET_STREET
+    context.user_data['temp_street'] = street.strip()
+
     keyboard = [
         [
             InlineKeyboardButton("✅ Да, Якутск", callback_data="ykt_yes"),
@@ -96,9 +100,14 @@ async def confirm_yakutsk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SET_DISTRICT
 
 async def process_district_after(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    district = normalize_district(update.message.text)
+    raw_district = update.message.text
+    valid, error_msg = validate_address_input(raw_district, "Район")
+    if not valid:
+        await update.message.reply_text(f"⚠️ {error_msg}")
+        return SET_DISTRICT
+    district = normalize_district(raw_district)
     street = context.user_data.get('temp_street')
-    
+
     database.save_user_preference(update.effective_chat.id, district=district, street=street)
     await update.message.reply_text(
         f"✅ Готово! Адрес сохранен.\n"
@@ -143,6 +152,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🔍 Проверить сейчас": await check_now(update, context)
     elif text == "⚙️ Мои настройки": await status(update, context)
     elif text == "❓ Справка": await start(update, context)
+
+def validate_address_input(text, field_name="Поле"):
+    if not text or not text.strip():
+        return False, f"{field_name} не может быть пустым. Попробуйте ещё раз."
+    text = text.strip()
+    if len(text) > 200:
+        return False, f"{field_name} слишком длинное (макс. 200 символов). Попробуйте короче."
+    if re.search(r'[a-zA-Z]', text):
+        return False, f"{field_name} должно быть на русском языке без латинских букв. Попробуйте ещё раз."
+    if re.search(r'[^\w\sа-яА-ЯёЁ0-9 ./,\-–()№"«»]', text):
+        return False, f"{field_name} содержит недопустимые символы. Используйте только буквы, цифры и знаки препинания."
+    if not re.match(r'^[а-яА-ЯёЁ0-9«"[({]', text):
+        return False, f"{field_name} должно начинаться с буквы или цифры. Попробуйте ещё раз."
+    return True, ""
+
 
 def normalize_district(text):
     if not text: return ""
@@ -270,11 +294,28 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
                 msg += f"📅 *Дата:* {m['date']}\n🕒 *Время:* {m['time']}\n📍 *Адреса:* {m['addresses']}\n🛠 *Причина:* {m['reason']}\n\n"
                 if s_hash: database.mark_as_notified(chat_id, s_hash)
             
-            try: await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
-            except Exception as e: logging.error(f"Error sending message to {chat_id}: {e}")
+            try:
+                await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+            except Exception as e:
+                err = str(e).lower()
+                if "blocked" in err or "deactivated" in err:
+                    try:
+                        database.set_blocked(chat_id)
+                    except Exception:
+                        pass
+                logging.error(f"Error sending message to {chat_id}: {e}")
             database.log_request(chat_id, f"Улица: {street}", True)
         elif target_chat_id:
-            await application.bot.send_message(chat_id=chat_id, text="✅ Работ не найдено.")
+            try:
+                await application.bot.send_message(chat_id=chat_id, text="✅ Работ не найдено.")
+            except Exception as e:
+                err = str(e).lower()
+                if "blocked" in err or "deactivated" in err:
+                    try:
+                        database.set_blocked(chat_id)
+                    except Exception:
+                        pass
+                logging.error(f"Error sending to {chat_id}: {e}")
             database.log_request(chat_id, f"Улица: {street}", False)
 
 async def scheduler_task(application):
