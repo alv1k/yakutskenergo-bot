@@ -1,6 +1,6 @@
 import sqlite3
 
-DB_NAME = '/home/alvik/yakutskenergo-bot/bot_database.db'
+DB_NAME = 'bot_database.db'
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
