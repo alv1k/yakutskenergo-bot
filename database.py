@@ -1,6 +1,6 @@
 import sqlite3
 
-DB_NAME = 'bot_database.db'
+DB_NAME = '/home/alvik/yakutskenergo-bot/bot_database.db'
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -20,6 +20,23 @@ def init_db():
             PRIMARY KEY (chat_id, schedule_hash)
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS request_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            chat_id INTEGER,
+            query_details TEXT,
+            found_status BOOLEAN
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def log_request(chat_id, query_details, found_status):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO request_logs (chat_id, query_details, found_status) VALUES (?, ?, ?)',
+                   (chat_id, query_details, found_status))
     conn.commit()
     conn.close()
 

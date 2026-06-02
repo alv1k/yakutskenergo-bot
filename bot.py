@@ -272,8 +272,10 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
             
             try: await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
             except Exception as e: logging.error(f"Error sending message to {chat_id}: {e}")
+            database.log_request(chat_id, f"Улица: {street}", True)
         elif target_chat_id:
             await application.bot.send_message(chat_id=chat_id, text="✅ Работ не найдено.")
+            database.log_request(chat_id, f"Улица: {street}", False)
 
 async def scheduler_task(application):
     ykt_tz = timezone(timedelta(hours=9))
