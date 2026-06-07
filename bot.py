@@ -27,15 +27,18 @@ logging.basicConfig(
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_TG_ID = os.getenv("ADMIN_TG_ID")
 
 # Conversation states
 SET_STREET, CONFIRM_YAKUTSK, SET_DISTRICT = range(3)
+
 
 def get_main_keyboard():
     keyboard = [
         [KeyboardButton("🔍 Проверить сейчас")],
         [KeyboardButton("📍 Настроить адрес")],
-        [KeyboardButton("⚙️ Мои настройки"), KeyboardButton("❓ Справка")]
+        [KeyboardButton("⚙️ Мои настройки"), KeyboardButton("❓ Справка")],
+        [KeyboardButton("📩 Поддержка")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -118,8 +121,67 @@ async def process_district_after(update: Update, context: ContextTypes.DEFAULT_T
     )
     return ConversationHandler.END
 
+async def start_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['support_mode'] = True
+    await update.message.reply_text(
+        "📩 Напишите ваше сообщение — оно будет отправлено администратору.\n\n"
+        "Для отмены: /cancel или ❌ Отмена",
+        reply_markup=ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True)
+    )
+
+async def process_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    if text == "❌ Отмена" or text == "/cancel":
+        context.user_data.pop('support_mode', None)
+        await update.message.reply_text("Отменено.", reply_markup=get_main_keyboard())
+        return
+
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    user_info = f"@{user.username}" if user.username else (user.first_name or "")
+    admin_text = f"💬 Поддержка от {user_info} (ID: {chat_id}):\n\n{text}"
+
+    try:
+        await context.bot.send_message(chat_id=int(ADMIN_TG_ID), text=admin_text)
+    except Exception as e:
+        logging.error(f"Support forward error: {e}")
+        await update.message.reply_text("⚠️ Ошибка отправки. Попробуйте позже.", reply_markup=get_main_keyboard())
+        return
+
+    await update.message.reply_text(
+        "✅ Сообщение отправлено. Ответ придёт сюда.",
+        reply_markup=get_main_keyboard()
+    )
+
+async def admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("⚠️ Ответьте на сообщение пользователя (Reply).")
+        return
+    orig = update.message.reply_to_message.text or ""
+    m = re.search(r"ID:\s*(\d+)", orig)
+    if not m:
+        await update.message.reply_text("⚠️ Не найден ID пользователя в сообщении.")
+        return
+    target_chat_id = int(m.group(1))
+    reply_text = " ".join(context.args)
+    if not reply_text:
+        await update.message.reply_text("⚠️ Укажите текст: /reply <сообщение>")
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=target_chat_id,
+            text=f"📩 Ответ от поддержки:\n\n{reply_text}"
+        )
+        await update.message.reply_text("✅ Ответ отправлен.")
+    except Exception as e:
+        logging.error(f"Admin reply error: {e}")
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Настройка отменена.", reply_markup=get_main_keyboard())
+    context.user_data.pop('support_mode', None)
+    await update.message.reply_text("Отменено.", reply_markup=get_main_keyboard())
     return ConversationHandler.END
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -149,9 +211,14 @@ async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    if text in ("🔍 Проверить сейчас", "⚙️ Мои настройки", "❓ Справка", "📍 Настроить адрес"):
+        context.user_data.pop('support_mode', None)
     if text == "🔍 Проверить сейчас": await check_now(update, context)
     elif text == "⚙️ Мои настройки": await status(update, context)
     elif text == "❓ Справка": await start(update, context)
+    elif text == "📩 Поддержка": await start_support(update, context)
+    elif context.user_data.get('support_mode'):
+        await process_support(update, context)
 
 def validate_address_input(text, field_name="Поле"):
     if not text or not text.strip():
@@ -405,10 +472,12 @@ if __name__ == '__main__':
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
+
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('menu', start))
     application.add_handler(CommandHandler('status', status))
     application.add_handler(CommandHandler('check', check_now))
+    application.add_handler(CommandHandler('reply', admin_reply, filters=filters.Chat(int(ADMIN_TG_ID))))
     application.add_handler(conv_handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
