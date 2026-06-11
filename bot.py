@@ -357,12 +357,19 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
                             match_found = True
                         else:
                             # 2. Range match — compare only main house number
-                            range_match = re.search(r'(\d+)\s*[–-]\s*(\d+)', norm_schedule_addr)
-                            if range_match:
-                                try:
-                                    if int(range_match.group(1)) <= main_house <= int(range_match.group(2)):
-                                        match_found = True
-                                except: pass
+                            if not match_found:
+                                range_matches = re.finditer(r'(\d+)\s*[–-]\s*(\d+)', norm_schedule_addr)
+                                for rm in range_matches:
+                                    try:
+                                        lo, hi = int(rm.group(1)), int(rm.group(2))
+                                        if lo <= main_house <= hi:
+                                            # Verify the range belongs to the same street by checking
+                                            # that the text before the range contains the street name
+                                            prefix = norm_schedule_addr[:rm.start()].lower()
+                                            if street_pattern.search(prefix + " "):
+                                                match_found = True
+                                                break
+                                    except: pass
 
                             # 3. Sub-building match — e.g. user has "9" and schedule has "9/3а"
                             if not match_found and sub_house is None:
