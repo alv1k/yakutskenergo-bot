@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import re
 import logging
 import urllib3
+import time
 
 # Suppress insecure request warnings if we disable SSL verify
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -13,6 +14,13 @@ NEWS_LIST_URL = f"{BASE_URL}/press/news/news-remont/"
 # Headers to mimic a real browser
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+
+# Кеш для результатов парсера
+_cache = {
+    'data': None,
+    'timestamp': 0,
+    'ttl': 1800,  # 30 минут
 }
 
 def get_latest_maintenance_urls():
@@ -116,10 +124,25 @@ def parse_maintenance_page(url):
         return []
 
 def get_all_recent_schedules():
+    global _cache
+    now = time.time()
+    
+    # Проверяем кеш
+    if _cache['data'] is not None and (now - _cache['timestamp']) < _cache['ttl']:
+        logging.info(f"Returning cached schedules ({len(_cache['data'])} entries, age={int(now - _cache['timestamp'])}s)")
+        return _cache['data']
+    
+    # Парсим свежие данные
     urls = get_latest_maintenance_urls()
     all_schedules = []
     for url in urls:
         all_schedules.extend(parse_maintenance_page(url))
+    
+    # Сохраняем в кеш
+    _cache['data'] = all_schedules
+    _cache['timestamp'] = now
+    logging.info(f"Fresh schedules parsed: {len(all_schedules)} entries")
+    
     return all_schedules
 
 if __name__ == "__main__":
