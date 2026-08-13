@@ -9,7 +9,8 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             chat_id INTEGER PRIMARY KEY,
-            bot_blocked INTEGER DEFAULT 0
+            bot_blocked INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     cursor.execute('''
@@ -51,6 +52,15 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute("PRAGMA table_info(users)")
+    cols = [col[1] for col in cursor.fetchall()]
+    if 'created_at' not in cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN created_at DATETIME")
+        cursor.execute('''
+            UPDATE users SET created_at = (
+                SELECT MIN(created_at) FROM addresses WHERE addresses.chat_id = users.chat_id
+            ) WHERE created_at IS NULL
+        ''')
     conn.commit()
     conn.close()
 
@@ -152,7 +162,7 @@ def add_address(chat_id, district, street):
     if cursor.fetchone()[0] >= MAX_ADDRESSES:
         conn.close()
         return False
-    cursor.execute('INSERT OR IGNORE INTO users (chat_id, bot_blocked) VALUES (?, 0)', (chat_id,))
+    cursor.execute('INSERT OR IGNORE INTO users (chat_id, bot_blocked, created_at) VALUES (?, 0, datetime("now"))', (chat_id,))
     cursor.execute('INSERT INTO addresses (chat_id, district, street) VALUES (?, ?, ?)',
                    (chat_id, district, street))
     address_id = cursor.lastrowid

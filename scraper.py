@@ -98,17 +98,24 @@ def parse_maintenance_page(url):
                 # The rest of the string after the time is addresses and reason
                 # Addresses are usually between the time and the last dash or the end
                 rest = text[time_match.end():].strip()
-                # Clean up leading dashes
-                rest = re.sub(r'^[–-]\s*', '', rest)
-                
-                # Split by the last "–" or "-" which usually indicates the reason
-                parts = re.split(r'\s*[–-]\s*', rest)
-                if len(parts) > 1:
-                    reason = parts[-1]
-                    addresses = " – ".join(parts[:-1])
+                rest = re.sub(r'^[–-—]\s*', '', rest)
+
+                reason_markers = (
+                    r'(ремонтн|допуск|проверк|техническ|капитальн|текущ'
+                    r'|срочн|планов|техприсоединени|монтаж|очистк|кратковремен)'
+                )
+                reason_match = re.search(r'\s*[–-—]\s+' + reason_markers, rest)
+                if reason_match:
+                    reason = rest[reason_match.start():].strip().lstrip('–-—').strip()
+                    addresses = rest[:reason_match.start()].strip()
                 else:
-                    addresses = rest
-                    reason = ""
+                    last_sep = re.search(r'\s*[–-—]\s*[а-я][^–-—]*$', rest)
+                    if last_sep:
+                        reason = rest[last_sep.start():].strip().lstrip('–-—').strip()
+                        addresses = rest[:last_sep.start()].strip()
+                    else:
+                        addresses = rest
+                        reason = ""
                 
                 schedules.append({
                     'district': current_district,

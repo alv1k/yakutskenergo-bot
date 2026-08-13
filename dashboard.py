@@ -2,15 +2,14 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import hashlib
+from datetime import datetime, timedelta
 
-# --- Configuration ---
 DB_NAME = 'bot_database.db'
-PASSWORD_HASH = "8757bebe2081f3ce966925fa0b548badb9ca3910ab6ab39ea2523fd8c62d783d"
+PASSWORD_HASH = "5ef8b46fd33d194c94af08922dd369f90ed597504dc0b22697f97d95f60bba3a"
 
 def check_password():
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
-    
     if not st.session_state.logged_in:
         pwd = st.text_input("Введите пароль:", type="password")
         if pwd:
@@ -22,32 +21,264 @@ def check_password():
         return False
     return True
 
-st.set_page_config(page_title="Bot Dashboard", layout="wide")
+def get_conn():
+    return sqlite3.connect(DB_NAME)
 
-if check_password():
-    st.title("📊 Дашборд пользователей бота")
-    
-    conn = sqlite3.connect(DB_NAME)
-    
-    df_users = pd.read_sql('SELECT * FROM users', conn)
-    df_logs = pd.read_sql('SELECT * FROM request_logs ORDER BY timestamp DESC LIMIT 50', conn)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Всего пользователей", len(df_users))
-    with col2:
-        st.metric("Уникальных районов", df_users['district'].nunique())
-    
-    st.subheader("Статистика по районам")
-    st.bar_chart(df_users['district'].value_counts())
-    
-    st.subheader("Список пользователей")
-    st.dataframe(df_users, use_container_width=True)
-
-    st.subheader("История запросов")
-    st.dataframe(df_logs, use_container_width=True)
-    
-    if st.button("Обновить данные"):
-        st.rerun()
-        
+@st.cache_data(ttl=60)
+def load_users():
+    conn = get_conn()
+    df = pd.read_sql('''
+        SELECT u.chat_id, u.bot_blocked, u.created_at,
+               COUNT(a.id) as address_count
+        FROM users u
+        LEFT JOIN addresses a ON a.chat_id = u.chat_id
+        GROUP BY u.chat_id
+        ORDER BY u.created_at DESC
+    ''', conn)
     conn.close()
+    return df
+
+@st.cache_data(ttl=60)
+def load_addresses():
+    conn = get_conn()
+    df = pd.read_sql('''
+        SELECT a.id, a.chat_id, a.district, a.street, a.created_at
+        FROM addresses a
+        ORDER BY a.district, a.street
+    ''', conn)
+    conn.close()
+    return df
+
+@st.cache_data(ttl=60)
+def load_notifications():
+    conn = get_conn()
+    df = pd.read_sql('''
+        SELECT sn.chat_id, sn.address_id, sn.schedule_hash, sn.sent_at,
+               a.district, a.street
+        FROM sent_notifications sn
+        LEFT JOIN addresses a ON a.id = sn.address_id
+        ORDER BY sn.sent_at DESC
+    ''', conn)
+    conn.close()
+    return df
+
+@st.cache_data(ttl=60)
+def load_request_logs():
+    conn = get_conn()
+    df = pd.read_sql('''
+        SELECT r.id, r.timestamp, r.chat_id, r.query_details, r.found_status
+        FROM request_logs r
+        ORDER BY r.timestamp DESC
+    ''', conn)
+    conn.close()
+    return df
+
+@st.cache_data(ttl=60)
+def load_tickets():
+    conn = get_conn()
+    df = pd.read_sql('''
+        SELECT id, chat_id, user_message, user_username, admin_reply,
+               replied_at, created_at
+        FROM support_tickets
+        ORDER BY created_at DESC
+    ''', conn)
+    conn.close()
+    return df
+
+def reply_to_ticket(ticket_id, reply_text):
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE support_tickets
+        SET admin_reply = ?, replied_at = datetime('now')
+        WHERE id = ?
+    ''', (reply_text, ticket_id))
+    conn.commit()
+    conn.close()
+    st.cache_data.clear()
+
+st.set_page_config(page_title="Якутскэнерго — Дашборд", layout="wide", page_icon="favicon.png")
+
+if not check_password():
+    st.stop()
+
+st.title("Якутскэнерго — панель управления ботом")
+
+df_users = load_users()
+df_addresses = load_addresses()
+df_notifications = load_notifications()
+df_logs = load_request_logs()
+df_tickets = load_tickets()
+
+tab_overview, tab_users, tab_addresses, tab_notif, tab_tickets, tab_logs = \
+    st.tabs(["Обзор", "Пользователи", "Адреса", "Уведомления", "Тикеты", "Лог запросов"])
+
+with tab_overview:
+    col1, col2, col3, col4 = st.columns(4)
+    total_users = len(df_users)
+    active_users = len(df_users[df_users['bot_blocked'] == 0])
+    total_addresses = len(df_addresses)
+    total_notif = len(df_notifications)
+    open_tickets = len(df_tickets[df_tickets['admin_reply'].isna()])
+
+    col1.metric("Всего пользователей", total_users, f"{active_users} активных")
+    col2.metric("Адресов", total_addresses)
+    col3.metric("Уведомлений отправлено", total_notif)
+    col4.metric("Открытых тикетов", open_tickets)
+
+    st.subheader("Уведомления по дням")
+    if not df_notifications.empty:
+        df_notif_daily = df_notifications.copy()
+        df_notif_daily['date'] = pd.to_datetime(df_notif_daily['sent_at']).dt.date
+        notif_by_day = df_notif_daily.groupby('date').size().reset_index(name='count')
+        st.bar_chart(notif_by_day.set_index('date'), height=250)
+    else:
+        st.info("Нет данных")
+
+    st.subheader("Запросы по дням")
+    if not df_logs.empty:
+        df_logs_daily = df_logs.copy()
+        df_logs_daily['date'] = pd.to_datetime(df_logs_daily['timestamp']).dt.date
+        logs_by_day = df_logs_daily.groupby(['date', 'found_status']).size().reset_index(name='count')
+        pivot = logs_by_day.pivot(index='date', columns='found_status', values='count').fillna(0)
+        pivot.columns = ['Не найдено', 'Найдено']
+        st.bar_chart(pivot, height=250)
+    else:
+        st.info("Нет данных")
+
+    st.subheader("Топ районов")
+    district_counts = df_addresses['district'].value_counts().head(10)
+    st.bar_chart(district_counts, height=250)
+
+with tab_users:
+    status_filter = st.radio("Фильтр", ["Все", "Активные", "Заблокированные"], horizontal=True)
+    filtered = df_users.copy()
+    if status_filter == "Активные":
+        filtered = filtered[filtered['bot_blocked'] == 0]
+    elif status_filter == "Заблокированные":
+        filtered = filtered[filtered['bot_blocked'] == 1]
+
+    col_s, col_m = st.columns([3, 1])
+    with col_s:
+        search_id = st.text_input("Поиск по chat_id")
+    if search_id:
+        filtered = filtered[filtered['chat_id'].astype(str).str.contains(search_id)]
+
+    display = filtered.rename(columns={
+        'chat_id': 'Chat ID', 'bot_blocked': 'Заблокирован',
+        'created_at': 'Зарегистрирован', 'address_count': 'Адресов'
+    })
+    display['Заблокирован'] = display['Заблокирован'].map({0: 'Нет', 1: 'Да'})
+    st.dataframe(display, width='stretch', hide_index=True)
+
+    st.divider()
+    st.subheader("Адреса выбранного пользователя")
+    user_ids = st.multiselect("Выберите chat_id", options=sorted(df_users['chat_id'].tolist()))
+    if user_ids:
+        user_addrs = df_addresses[df_addresses['chat_id'].isin(user_ids)]
+        st.dataframe(
+            user_addrs[['id', 'district', 'street', 'created_at']].rename(columns={
+                'id': 'ID', 'district': 'Район', 'street': 'Улица', 'created_at': 'Добавлен'
+            }),
+            width='stretch', hide_index=True
+        )
+
+with tab_addresses:
+    st.subheader(f"Всего адресов: {len(df_addresses)}")
+
+    districts = sorted(df_addresses['district'].unique())
+    sel_district = st.selectbox("Фильтр по району", ["Все"] + districts)
+    filtered_addr = df_addresses.copy()
+    if sel_district != "Все":
+        filtered_addr = filtered_addr[filtered_addr['district'] == sel_district]
+
+    st.dataframe(
+        filtered_addr[['id', 'chat_id', 'district', 'street', 'created_at']].rename(columns={
+            'id': 'ID', 'chat_id': 'Chat ID', 'district': 'Район',
+            'street': 'Улица', 'created_at': 'Добавлен'
+        }),
+        width='stretch', hide_index=True
+    )
+
+    st.subheader("Адресов по районам")
+    dist_counts = df_addresses['district'].value_counts().reset_index()
+    dist_counts.columns = ['Район', 'Количество']
+    st.dataframe(dist_counts, width='stretch', hide_index=True)
+
+with tab_notif:
+    st.subheader(f"Всего отправлено: {len(df_notifications)}")
+
+    notif_filter = st.text_input("Поиск по chat_id", key="notif_search")
+    filtered_notif = df_notifications.copy()
+    if notif_filter:
+        filtered_notif = filtered_notif[filtered_notif['chat_id'].astype(str).str.contains(notif_filter)]
+
+    display_notif = filtered_notif.rename(columns={
+        'chat_id': 'Chat ID', 'address_id': 'ID адреса',
+        'schedule_hash': 'Хэш', 'sent_at': 'Отправлено',
+        'district': 'Район', 'street': 'Улица'
+    })
+    st.dataframe(display_notif, width='stretch', hide_index=True)
+
+with tab_tickets:
+    ticket_view = st.radio("Показать", ["Открытые", "Закрытые", "Все"], horizontal=True)
+
+    filtered_tickets = df_tickets.copy()
+    if ticket_view == "Открытые":
+        filtered_tickets = filtered_tickets[filtered_tickets['admin_reply'].isna()]
+    elif ticket_view == "Закрытые":
+        filtered_tickets = filtered_tickets[filtered_tickets['admin_reply'].notna()]
+
+    for _, row in filtered_tickets.iterrows():
+        with st.container(border=True):
+            st.markdown(f"**Тикет #{row['id']}** — Chat ID: `{row['chat_id']}` — {row['created_at']}")
+            if row['user_username']:
+                st.markdown(f"Username: @{row['user_username']}")
+            st.markdown(f"**Сообщение:** {row['user_message']}")
+            if pd.notna(row['admin_reply']):
+                st.success(f"**Ответ:** {row['admin_reply']} ({row['replied_at']})")
+            else:
+                reply_key = f"reply_{row['id']}"
+                reply_text = st.text_area("Ваш ответ:", key=f"input_{row['id']}", label_visibility="collapsed")
+                if st.button("Отправить ответ", key=f"btn_{row['id']}") and reply_text.strip():
+                    reply_to_ticket(row['id'], reply_text.strip())
+                    st.success("Ответ отправлен!")
+                    st.rerun()
+
+    if filtered_tickets.empty:
+        st.info("Нет тикетов")
+
+with tab_logs:
+    st.subheader(f"Всего записей: {len(df_logs)}")
+
+    col_f1, col_f2, col_f3 = st.columns(3)
+    with col_f1:
+        log_search = st.text_input("Поиск по запросу")
+    with col_f2:
+        status_filter_log = st.selectbox("Статус", ["Все", "Найдено", "Не найдено"])
+    with col_f3:
+        days_back = st.number_input("Последние N дней", min_value=1, value=30)
+
+    filtered_logs = df_logs.copy()
+    cutoff = datetime.now() - timedelta(days=days_back)
+    filtered_logs['timestamp_dt'] = pd.to_datetime(filtered_logs['timestamp'])
+    filtered_logs = filtered_logs[filtered_logs['timestamp_dt'] >= cutoff]
+
+    if log_search:
+        filtered_logs = filtered_logs[filtered_logs['query_details'].str.contains(log_search, case=False, na=False)]
+    if status_filter_log == "Найдено":
+        filtered_logs = filtered_logs[filtered_logs['found_status'] == 1]
+    elif status_filter_log == "Не найдено":
+        filtered_logs = filtered_logs[filtered_logs['found_status'] == 0]
+
+    display_logs = filtered_logs.drop(columns=['timestamp_dt']).rename(columns={
+        'id': 'ID', 'timestamp': 'Время', 'chat_id': 'Chat ID',
+        'query_details': 'Запрос', 'found_status': 'Найдено'
+    })
+    display_logs['Найдено'] = display_logs['Найдено'].map({0: 'Нет', 1: 'Да'})
+    st.dataframe(display_logs, width='stretch', hide_index=True)
+
+st.caption(f"Данные актуальны на: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+           f"(кеш обновляется каждые 60 сек)")
+st.caption(f"https://www.yakutskenergo.ru/press/news/news-remont")
+         

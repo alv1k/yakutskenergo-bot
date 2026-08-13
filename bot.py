@@ -344,15 +344,13 @@ def validate_address_input(text, field_name="Поле"):
 
 def normalize_district(text):
     if not text: return ""
-    text = text.upper()
+    text = text.upper().replace('Ё', 'Е')
     prefixes = ["Г.", "ПГТ", "ПОС.", "ПОСЕЛОК", "С.", "СЕЛО", "УЛУС", "РАЙОН", "Р-Н"]
     for p in prefixes: text = re.sub(rf'\b{re.escape(p)}\b', ' ', text)
     text = re.sub(r'[^А-Я0-9\s-]', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def _expand_single_letter(token):
-    if re.fullmatch(r'[а-яёв]', token):
-        return r"[а-яёв]{2,}"
     return re.escape(token)
 
 def build_street_pattern(core_name):
@@ -368,19 +366,28 @@ def build_street_pattern(core_name):
     pattern = "".join(pattern_parts)
     return re.compile(r'(?:^|[\s,/])' + pattern + r'(?:\s|$|[^\wа-яё])', re.IGNORECASE)
 
+_ADDR_REPLACE = {
+    "переулок": "пер", "микрорайон": "мкр", "набережная": "наб",
+    "товарищество": "ст", "километр": "км", "проспект": "пр",
+    "бульвар": "б-р", "площадь": "пл", "проезд": "пр-д",
+    "участок": "уч", "корпус": "корп", "улица": "ул",
+    "шоссе": "ш", "тупик": "туп", "тракт": "тр",
+    "бул": "б-р", "пр": "пр-д",
+}
+
+_ADDR_PATTERN = re.compile(
+    r'\b(' + '|'.join(re.escape(k) for k in sorted(_ADDR_REPLACE, key=len, reverse=True)) + r')\b'
+)
+
+
 def normalize_address(text):
     if not text: return ""
     text = text.lower()
+    text = text.replace('ё', 'е')
     text = re.sub(r'\s*(кв|квартира|подъезд|этаж)\s*\d+.*$', '', text)
-    replacements = {
-        "улица": "ул", "переулок": "пер", "проспект": "пр", "бульвар": "б-р",
-        "бул": "б-р", "шоссе": "ш", "проезд": "пр-д", "пр": "пр-д",
-        "тупик": "туп", "набережная": "наб", "площадь": "пл", "тракт": "тр",
-        "микрорайон": "мкр", "корпус": "корп", "километр": "км", "участок": "уч", "товарищество": "ст",
-    }
-    for old, new in replacements.items(): text = text.replace(old, new)
     text = text.replace(".", " ").replace(",", " ")
     text = re.sub(r'\b(дом|д|уч|участка)\b', ' ', text)
+    text = _ADDR_PATTERN.sub(lambda m: _ADDR_REPLACE[m.group(1)], text)
     text = re.sub(r'\bкорп\b', ' корп ', text)
     text = re.sub(r'[^а-я0-9\s\/\-–]', '', text)
     return re.sub(r'\s+', ' ', text).strip()
@@ -490,10 +497,10 @@ def parse_user_address(street):
             if house_match:
                 result['house_num'] = house_match.group(1).replace(" ", "")
                 result['street_name'] = norm[:house_match.start()].strip()
-                m = re.match(r'^(\d+)(?:/(.+))?$', result['house_num'])
+                m = re.match(r'(\d+)(.*)', result['house_num'])
                 if m:
                     result['main_house'] = int(m.group(1))
-                    result['sub_house'] = m.group(2)
+                    result['sub_house'] = m.group(2) or None
     core = re.sub(r'\b(ул|пер|пр|ш|наб|пл|пр-д|туп|б-р|тр|мкр|корп|снт|сот|днт|гсп|км)\b', '', result['street_name']).strip()
     if mkr_val:
         result['core_name'] = mkr_val
@@ -506,31 +513,59 @@ def parse_user_address(street):
     return result
 
 
+def extract_street_houses(norm):
+    tokens = norm.split()
+    if not tokens:
+        return '', ''
+    house_start = len(tokens)
+    for i, tok in enumerate(tokens):
+        if re.match(r'^\d+[/–-]', tok):
+            house_start = i
+            break
+        if re.match(r'^\d+[а-я]$', tok):
+            house_start = i
+            break
+        if re.match(r'^\d+$', tok):
+            if i == len(tokens) - 1:
+                house_start = i
+                break
+            next_tok = tokens[i + 1]
+            if re.match(r'^[\d/–-]+[а-я]?$', next_tok):
+                house_start = i
+                break
+    street_tokens = tokens[:house_start]
+    house_tokens = tokens[house_start:]
+    return ' '.join(street_tokens), ' '.join(house_tokens)
+
+
 def split_schedule_addresses(addr_string):
     norm = normalize_address(addr_string)
-    raw_parts = re.split(r',\s*(?=[А-ЯЁ])', addr_string)
+    norm = re.sub(r'(\d+)\s*[–-]\s*(?=\d)', r'\1-', norm)
+    raw_parts = re.split(r',\s*(?=[А-Яа-яЁё])', addr_string)
     groups = []
     for part in raw_parts:
         part = part.strip().rstrip('.,')
         if not part:
             continue
         part_norm = normalize_address(part)
+        part_norm = re.sub(r'(\d+)\s*[–-]\s*(?=\d)', r'\1-', part_norm)
         if not part_norm:
             continue
+        street_name, houses = extract_street_houses(part_norm)
         km_range_m = re.search(r'(\d+)\s*[-–]\s*(\d+)\s*км', part_norm)
         km_single_m = re.search(r'(\d+)\s*км', part_norm)
-        street_part = part_norm
+        street_part = street_name
         km_value = None
         km_from = None
         km_to = None
         if km_range_m:
             km_from = int(km_range_m.group(1))
             km_to = int(km_range_m.group(2))
-            street_part = part_norm[:km_range_m.start()].strip()
+            street_part = street_name
         elif km_single_m:
             km_value = int(km_single_m.group(1))
-            street_part = part_norm[:km_single_m.start()].strip()
-        houses_part = re.sub(r'\b\d+\s*(?:-\s*\d+)?\s*км\b', '', part_norm).strip()
+            street_part = street_name
+        houses_part = re.sub(r'\b\d+\s*(?:-\s*\d+)?\s*км\b', '', houses).strip()
         houses_part = re.sub(r'\b(ул|пер|пр|ш|наб|пл|пр-д|туп|б-р|тр|мкр|корп|снт|сот|днт|гсп|км)\b', '', houses_part).strip()
         groups.append({
             'street_norm': street_part,
@@ -539,6 +574,7 @@ def split_schedule_addresses(addr_string):
             'km_to': km_to,
             'houses_part': houses_part,
             'full_norm': part_norm,
+            'houses': houses,
         })
     if not groups:
         groups.append({
@@ -548,6 +584,7 @@ def split_schedule_addresses(addr_string):
             'km_to': None,
             'houses_part': '',
             'full_norm': norm,
+            'houses': '',
         })
     return groups
 
@@ -559,7 +596,7 @@ def match_address_against_schedule(ua, norm_user_district, s, addr_groups):
         return False
     street_pattern = build_street_pattern(ua['core_name'])
     for grp in addr_groups:
-        if not street_pattern.search(grp['full_norm']):
+        if not street_pattern.search(grp['street_norm']):
             continue
         if ua['is_km_address']:
             grp_has_km = grp['km_value'] is not None or grp['km_from'] is not None
@@ -573,7 +610,7 @@ def match_address_against_schedule(ua, norm_user_district, s, addr_groups):
                         km_match = True
                 if km_match:
                     if ua['main_house'] is not None:
-                        if re.search(r'\b' + re.escape(ua['house_num']) + r'\b', grp['full_norm']):
+                        if re.search(r'\b' + re.escape(ua['house_num']) + r'\b', grp['houses']):
                             return True
                         elif not re.search(r'\b\d+\b', grp['houses_part']):
                             return True
@@ -589,25 +626,23 @@ def match_address_against_schedule(ua, norm_user_district, s, addr_groups):
                 match_house = int(ua['korpus'])
                 match_num = ua['korpus']
             if match_house is not None:
-                house_direct = re.search(r'\b' + re.escape(match_num) + r'\b', grp['full_norm'])
+                house_direct = re.search(r'\b' + re.escape(match_num) + r'\b(?!/)', grp['houses'])
                 if house_direct:
                     if ua['korpus'] is not None and not ua['mkr']:
                         korpus_pattern = re.escape(match_num) + r'\s*корп\s*' + re.escape(ua['korpus'])
-                        if re.search(korpus_pattern, grp['full_norm']):
+                        if re.search(korpus_pattern, grp['houses']):
                             return True
-                        elif not re.search(re.escape(match_num) + r'\s*корп', grp['full_norm']):
+                        elif not re.search(re.escape(match_num) + r'\s*корп', grp['houses']):
                             return True
                     else:
                         return True
                 else:
-                    range_matches = re.finditer(r'(\d+)\s*[–-]\s*(\d+)', grp['full_norm'])
+                    range_matches = re.finditer(r'(\d+)\s*[–-]\s*(\d+)', grp['houses'])
                     for rm in range_matches:
                         try:
                             lo, hi = int(rm.group(1)), int(rm.group(2))
                             if lo <= match_house <= hi:
-                                prefix = grp['full_norm'][:rm.start()].lower()
-                                if street_pattern.search(prefix + " "):
-                                    return True
+                                return True
                         except: pass
                 if ua['sub_house'] is None:
                     sub_match = re.search(r'\b' + str(match_house) + r'/\S+', grp['full_norm'])
@@ -622,7 +657,7 @@ def match_address_against_schedule(ua, norm_user_district, s, addr_groups):
                             return True
                 if "частич" in grp['full_norm'] or "полн" in grp['full_norm']:
                     return True
-                elif not re.search(r'\d', grp['full_norm']):
+                elif not re.search(r'\d', grp['houses']):
                     return True
             else:
                 return True
@@ -666,7 +701,11 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
             addr_groups = split_schedule_addresses(s['addresses'])
 
             for aid, district, street in addresses:
-                ua = parse_user_address(street)
+                try:
+                    ua = parse_user_address(street)
+                except Exception as e:
+                    logging.error(f"Failed to parse address '{street}' (chat_id={chat_id}): {e}")
+                    continue
                 norm_user_district = normalize_district(district)
                 if match_address_against_schedule(ua, norm_user_district, s, addr_groups):
                     s_hash = hashlib.md5(f"{s['date']}{s['time']}{s['addresses']}{s['reason']}".encode()).hexdigest()
@@ -737,7 +776,10 @@ async def scheduler_task(application):
             wait_seconds = (t9 - now_ykt).total_seconds()
             logging.info(f"Next run at {t9} (YKT), checking today. Waiting {wait_seconds}s")
             await asyncio.sleep(wait_seconds)
-            await check_updates(application, force_date=today)
+            try:
+                await check_updates(application, force_date=today)
+            except Exception as e:
+                logging.error(f"Scheduler check (today) failed: {e}", exc_info=True)
 
         # Проверяем на завтра в 09:00 (если 09:00 уже прошло сегодня)
         # или в 21:00 (если между 09:00 и 21:00)
@@ -745,14 +787,20 @@ async def scheduler_task(application):
             wait_seconds = (t21 - now_ykt).total_seconds()
             logging.info(f"Next run at {t21} (YKT), checking tomorrow. Waiting {wait_seconds}s")
             await asyncio.sleep(wait_seconds)
-            await check_updates(application, force_date=tomorrow)
+            try:
+                await check_updates(application, force_date=tomorrow)
+            except Exception as e:
+                logging.error(f"Scheduler check (tomorrow evening) failed: {e}", exc_info=True)
 
         # Если оба времени прошли, ждём до завтра 09:00
         next_t9 = t9 + timedelta(days=1)
-        wait_seconds = (next_t9 - now_ykt).total_seconds()
+        wait_seconds = (next_t9 - datetime.now(ykt_tz)).total_seconds()
         logging.info(f"Next run at {next_t9} (YKT), checking tomorrow. Waiting {wait_seconds}s")
         await asyncio.sleep(wait_seconds)
-        await check_updates(application, force_date=tomorrow)
+        try:
+            await check_updates(application, force_date=tomorrow)
+        except Exception as e:
+            logging.error(f"Scheduler check (next morning) failed: {e}", exc_info=True)
 
         # Small sleep to prevent immediate re-triggering
         await asyncio.sleep(60)
