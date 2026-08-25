@@ -1,0 +1,57 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 10808,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      },
+      "tag": "socks-in"
+    },
+    {
+      "port": 10809,
+      "listen": "127.0.0.1",
+      "protocol": "http",
+      "settings": {},
+      "tag": "http-in"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "139.100.207.18",
+            "port": 443,
+            "users": [
+              {
+                "id": "ad57a4f3-2bc2-4130-bac4-b74360ed7ef7",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "serverName": "swscan.apple.com",
+          "publicKey": "lTw4AiahAWkMKBiKaYdN83MiHUMQDFmzOVQQCynPiko",
+          "shortId": "16c45a85",
+          "spiderX": "/ea406e661d4ce34",
+          "fingerprint": "chrome"
+        }
+      },
+      "tag": "ru-out"
+    }
+  ]
+}

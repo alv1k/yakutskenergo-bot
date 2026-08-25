@@ -1,8 +1,14 @@
+import os
+import requests
+from dotenv import load_dotenv
 import streamlit as st
 import pandas as pd
 import sqlite3
 import hashlib
 from datetime import datetime, timedelta
+
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 DB_NAME = 'bot_database.db'
 PASSWORD_HASH = "5ef8b46fd33d194c94af08922dd369f90ed597504dc0b22697f97d95f60bba3a"
@@ -11,13 +17,15 @@ def check_password():
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
     if not st.session_state.logged_in:
-        pwd = st.text_input("Введите пароль:", type="password")
-        if pwd:
-            if hashlib.sha256(pwd.encode()).hexdigest() == PASSWORD_HASH:
-                st.session_state.logged_in = True
-                st.rerun()
-            else:
-                st.error("Неверный пароль")
+        with st.form(key="login_form"):
+            pwd = st.text_input("Введите пароль:", type="password")
+            submit = st.form_submit_button("Войти")
+            if submit and pwd:
+                if hashlib.sha256(pwd.encode()).hexdigest() == PASSWORD_HASH:
+                    st.session_state.logged_in = True
+                    st.rerun()
+                else:
+                    st.error("Неверный пароль")
         return False
     return True
 
@@ -85,7 +93,23 @@ def load_tickets():
     conn.close()
     return df
 
-def reply_to_ticket(ticket_id, reply_text):
+def reply_to_ticket(ticket_id, chat_id, reply_text):
+    if BOT_TOKEN and chat_id:
+        tg_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        text_to_send = f"📩 *Ответ поддержки:*\n\n{reply_text}"
+        try:
+            resp = requests.post(tg_url, json={
+                "chat_id": chat_id,
+                "text": text_to_send,
+                "parse_mode": "Markdown"
+            }, timeout=10)
+            if not resp.ok:
+                st.error(f"Ошибка отправки сообщения в Telegram: {resp.text}")
+                return False
+        except Exception as e:
+            st.error(f"Не удалось связаться с Telegram API: {e}")
+            return False
+
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute('''
@@ -96,6 +120,7 @@ def reply_to_ticket(ticket_id, reply_text):
     conn.commit()
     conn.close()
     st.cache_data.clear()
+    return True
 
 st.set_page_config(page_title="Якутскэнерго — Дашборд", layout="wide", page_icon="favicon.png")
 
@@ -241,9 +266,9 @@ with tab_tickets:
                 reply_key = f"reply_{row['id']}"
                 reply_text = st.text_area("Ваш ответ:", key=f"input_{row['id']}", label_visibility="collapsed")
                 if st.button("Отправить ответ", key=f"btn_{row['id']}") and reply_text.strip():
-                    reply_to_ticket(row['id'], reply_text.strip())
-                    st.success("Ответ отправлен!")
-                    st.rerun()
+                    if reply_to_ticket(row['id'], row['chat_id'], reply_text.strip()):
+                        st.success("Ответ отправлен!")
+                        st.rerun()
 
     if filtered_tickets.empty:
         st.info("Нет тикетов")

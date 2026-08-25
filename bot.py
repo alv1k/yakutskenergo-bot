@@ -109,7 +109,7 @@ async def confirm_yakutsk(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Адрес добавлен!\n"
                 f"Район: {district}\n"
                 f"Улица: {street}\n\n"
-                "Уведомления придут в 9:00 или 21:00 по Якутску."
+                "Уведомления придут в 10:00 или 22:00 по Якутску."
             )
         return ConversationHandler.END
     else:
@@ -140,7 +140,7 @@ async def process_district_after(update: Update, context: ContextTypes.DEFAULT_T
             f"✅ Адрес добавлен!\n"
             f"Район: {district}\n"
             f"Улица: {street}\n\n"
-            "Уведомления придут в 9:00 или 21:00 по Якутску.",
+            "Уведомления придут в 10:00 или 22:00 по Якутску.",
             reply_markup=get_main_keyboard()
         )
     return ConversationHandler.END
@@ -710,29 +710,28 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
                 if match_address_against_schedule(ua, norm_user_district, s, addr_groups):
                     s_hash = hashlib.md5(f"{s['date']}{s['time']}{s['addresses']}{s['reason']}".encode()).hexdigest()
                     if is_manual:
-                        all_matches.append((s, street, None))
+                        all_matches.append((s, street, aid, None))
                     elif not database.is_notified(chat_id, aid, s_hash):
-                        all_matches.append((s, street, s_hash))
+                        all_matches.append((s, street, aid, s_hash))
 
         if all_matches:
             # Группируем записи по адресу
             from collections import defaultdict
             by_address = defaultdict(list)
-            for m, street, s_hash in all_matches:
-                by_address[street].append((m, s_hash))
+            for m, street, aid, s_hash in all_matches:
+                by_address[street].append((m, aid, s_hash))
 
             msg = "⚠️ *Внимание! Обнаружены плановые работы:*\n\n"
             seen_hashes = set()
             for street, entries in by_address.items():
-                for m, s_hash in entries:
-                    if s_hash and s_hash in seen_hashes:
+                for m, aid, s_hash in entries:
+                    if s_hash and (aid, s_hash) in seen_hashes:
                         continue
                     if s_hash:
-                        seen_hashes.add(s_hash)
+                        seen_hashes.add((aid, s_hash))
                     msg += f"📍 *Адрес:* {street}\n📅 *Дата:* {m['date']}\n🕒 *Время:* {m['time']}\n🏠 *Где:* {m['addresses']}\n🛠 *Причина:* {m['reason']}\n\n"
                     if s_hash:
-                        for aid, dist, st in addresses:
-                            database.mark_as_notified(chat_id, aid, s_hash)
+                        database.mark_as_notified(chat_id, aid, s_hash)
 
             try:
                 await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
@@ -744,8 +743,10 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
                     except Exception:
                         pass
                 logging.error(f"Error sending message to {chat_id}: {e}")
+
+            matched_aids = {aid for _, _, aid, _ in all_matches}
             for aid, district, street in addresses:
-                database.log_request(chat_id, f"Улица: {street}", True)
+                database.log_request(chat_id, f"Улица: {street}", aid in matched_aids)
         elif target_chat_id:
             try:
                 await application.bot.send_message(chat_id=chat_id, text="✅ Работ не найдено.")
@@ -768,34 +769,34 @@ async def scheduler_task(application):
         tomorrow = today + timedelta(days=1)
 
         # Define target times in YKT
-        t9 = now_ykt.replace(hour=9, minute=0, second=0, microsecond=0)
-        t21 = now_ykt.replace(hour=21, minute=0, second=0, microsecond=0)
+        t10 = now_ykt.replace(hour=10, minute=0, second=0, microsecond=0)
+        t22 = now_ykt.replace(hour=22, minute=0, second=0, microsecond=0)
 
-        # Проверяем на сегодня, если 09:00 ещё не прошло
-        if now_ykt < t9:
-            wait_seconds = (t9 - now_ykt).total_seconds()
-            logging.info(f"Next run at {t9} (YKT), checking today. Waiting {wait_seconds}s")
+        # Проверяем на сегодня, если 10:00 ещё не прошло
+        if now_ykt < t10:
+            wait_seconds = (t10 - now_ykt).total_seconds()
+            logging.info(f"Next run at {t10} (YKT), checking today. Waiting {wait_seconds}s")
             await asyncio.sleep(wait_seconds)
             try:
                 await check_updates(application, force_date=today)
             except Exception as e:
                 logging.error(f"Scheduler check (today) failed: {e}", exc_info=True)
 
-        # Проверяем на завтра в 09:00 (если 09:00 уже прошло сегодня)
-        # или в 21:00 (если между 09:00 и 21:00)
-        if now_ykt < t21:
-            wait_seconds = (t21 - now_ykt).total_seconds()
-            logging.info(f"Next run at {t21} (YKT), checking tomorrow. Waiting {wait_seconds}s")
+        # Проверяем на завтра в 10:00 (если 10:00 уже прошло сегодня)
+        # или в 22:00 (если между 10:00 и 22:00)
+        if now_ykt < t22:
+            wait_seconds = (t22 - now_ykt).total_seconds()
+            logging.info(f"Next run at {t22} (YKT), checking tomorrow. Waiting {wait_seconds}s")
             await asyncio.sleep(wait_seconds)
             try:
                 await check_updates(application, force_date=tomorrow)
             except Exception as e:
                 logging.error(f"Scheduler check (tomorrow evening) failed: {e}", exc_info=True)
 
-        # Если оба времени прошли, ждём до завтра 09:00
-        next_t9 = t9 + timedelta(days=1)
-        wait_seconds = (next_t9 - datetime.now(ykt_tz)).total_seconds()
-        logging.info(f"Next run at {next_t9} (YKT), checking tomorrow. Waiting {wait_seconds}s")
+        # Если оба времени прошли, ждём до завтра 10:00
+        next_t10 = t10 + timedelta(days=1)
+        wait_seconds = (next_t10 - datetime.now(ykt_tz)).total_seconds()
+        logging.info(f"Next run at {next_t10} (YKT), checking tomorrow. Waiting {wait_seconds}s")
         await asyncio.sleep(wait_seconds)
         try:
             await check_updates(application, force_date=tomorrow)

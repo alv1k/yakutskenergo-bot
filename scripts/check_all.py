@@ -69,8 +69,7 @@ for chat_id, addresses in user_addresses.items():
                     continue
                 seen_hashes.add(s_hash)
                 msg += f"📍 *Адрес:* {street}\\n📅 *Дата:* {m['date']}\\n🕒 *Время:* {m['time']}\\n🏠 *Где:* {m['addresses']}\\n🛠 *Причина:* {m['reason']}\\n\\n"
-                for a, d, s in addresses:
-                    database.mark_as_notified(chat_id, a, s_hash)
+                database.mark_as_notified(chat_id, aid, s_hash)
         
         bot = Bot(token=TOKEN)
         try:
