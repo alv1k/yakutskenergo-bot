@@ -28,27 +28,24 @@
         "vnext": [
           {
             "address": "139.100.207.18",
-            "port": 443,
+            "port": 8443,
             "users": [
               {
                 "id": "ad57a4f3-2bc2-4130-bac4-b74360ed7ef7",
-                "encryption": "none",
-                "flow": "xtls-rprx-vision"
+                "encryption": "none"
               }
             ]
           }
         ]
       },
       "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "serverName": "swscan.apple.com",
-          "publicKey": "lTw4AiahAWkMKBiKaYdN83MiHUMQDFmzOVQQCynPiko",
-          "shortId": "16c45a85",
-          "spiderX": "/ea406e661d4ce34",
-          "fingerprint": "chrome"
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "ru-server.tiinservice.online"
+        },
+        "wsSettings": {
+          "path": "/api/v1/ws"
         }
       },
       "tag": "ru-out"

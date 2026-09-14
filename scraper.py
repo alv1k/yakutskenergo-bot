@@ -4,6 +4,7 @@ import re
 import logging
 import urllib3
 import time
+import html
 
 # Suppress insecure request warnings if we disable SSL verify
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -31,9 +32,10 @@ _cache = {
 }
 
 def get_latest_maintenance_urls():
-    for attempt in range(2):
+    max_attempts = 3
+    for attempt in range(max_attempts):
         try:
-            response = requests.get(NEWS_LIST_URL, headers=HEADERS, timeout=20, verify=False, proxies=PROXIES)
+            response = requests.get(NEWS_LIST_URL, headers=HEADERS, timeout=25, verify=False, proxies=PROXIES)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
             
@@ -48,16 +50,17 @@ def get_latest_maintenance_urls():
             
             return news_links[:3]
         except Exception as e:
-            logging.warning(f"Attempt {attempt+1} error fetching news list: {e}")
-            if attempt == 0:
-                time.sleep(2)
+            logging.warning(f"Attempt {attempt+1}/{max_attempts} error fetching news list: {e}")
+            if attempt < max_attempts - 1:
+                time.sleep(2 * (attempt + 1))
     return []
 
 def parse_maintenance_page(url):
-    for attempt in range(2):
+    max_attempts = 3
+    for attempt in range(max_attempts):
         try:
             logging.info(f"Parsing page: {url}")
-            response = requests.get(url, headers=HEADERS, timeout=20, verify=False, proxies=PROXIES)
+            response = requests.get(url, headers=HEADERS, timeout=25, verify=False, proxies=PROXIES)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
             
@@ -73,8 +76,9 @@ def parse_maintenance_page(url):
             content_text = text_block.decode_contents()
             content_text = re.sub(r'<(p|div|br|u|b|li)[^>]*>', '\n', content_text)
             content_text = re.sub(r'</(p|div|u|b|li)>', '\n', content_text)
+            content_text = re.sub(r'<[^>]+>', '', content_text)
             
-            lines = [BeautifulSoup(line, 'html.parser').get_text(strip=True) for line in content_text.split('\n')]
+            lines = [html.unescape(line).strip() for line in content_text.split('\n') if line.strip()]
 
             for text in lines:
                 if not text: continue

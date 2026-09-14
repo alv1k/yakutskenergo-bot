@@ -1,9 +1,14 @@
+import sys
+import os
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from telegram import Bot
 from dotenv import load_dotenv
-import os
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
+
 import database
 import scraper
 from bot import parse_user_address, match_address_against_schedule, split_schedule_addresses, normalize_district, parse_russian_date

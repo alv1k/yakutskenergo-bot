@@ -13,19 +13,34 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_NAME = 'bot_database.db'
 PASSWORD_HASH = "5ef8b46fd33d194c94af08922dd369f90ed597504dc0b22697f97d95f60bba3a"
 
+MONTHS_RU = {
+    1: 'янв', 2: 'фев', 3: 'мар', 4: 'апр', 5: 'май', 6: 'июн',
+    7: 'июл', 8: 'авг', 9: 'сен', 10: 'окт', 11: 'ноя', 12: 'дек'
+}
+
+def format_ru_date(val, include_time=False):
+    if not val or pd.isna(val):
+        return '-'
+    dt = pd.to_datetime(val) + timedelta(hours=9)
+    base = f"{dt.day} {MONTHS_RU.get(dt.month, '')} {dt.year}"
+    if include_time:
+        return f"{base}, {dt.strftime('%H:%M')}"
+    return base
+
 def check_password():
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
     if not st.session_state.logged_in:
-        with st.form(key="login_form"):
-            pwd = st.text_input("Введите пароль:", type="password")
-            submit = st.form_submit_button("Войти")
-            if submit and pwd:
-                if hashlib.sha256(pwd.encode()).hexdigest() == PASSWORD_HASH:
-                    st.session_state.logged_in = True
-                    st.rerun()
-                else:
-                    st.error("Неверный пароль")
+        pwd = st.text_input("Введите пароль:", type="password", key="login_pwd")
+        submit = st.button("Войти", key="login_btn")
+        if pwd and (submit or st.session_state.get("login_pwd_submitted", False)):
+            if hashlib.sha256(pwd.encode()).hexdigest() == PASSWORD_HASH:
+                st.session_state.logged_in = True
+                st.rerun()
+            else:
+                st.error("Неверный пароль")
+        elif submit and not pwd:
+            st.warning("Введите пароль")
         return False
     return True
 
@@ -36,11 +51,29 @@ def get_conn():
 def load_users():
     conn = get_conn()
     df = pd.read_sql('''
-        SELECT u.chat_id, u.bot_blocked, u.created_at,
-               COUNT(a.id) as address_count
+        SELECT 
+            u.chat_id, 
+            u.bot_blocked, 
+            u.created_at,
+            COALESCE(a.address_count, 0) as address_count,
+            COALESCE(sn.notif_count, 0) as notif_count,
+            COALESCE(r.request_count, 0) as request_count
         FROM users u
-        LEFT JOIN addresses a ON a.chat_id = u.chat_id
-        GROUP BY u.chat_id
+        LEFT JOIN (
+            SELECT chat_id, COUNT(*) as address_count 
+            FROM addresses 
+            GROUP BY chat_id
+        ) a ON a.chat_id = u.chat_id
+        LEFT JOIN (
+            SELECT chat_id, COUNT(*) as notif_count 
+            FROM sent_notifications 
+            GROUP BY chat_id
+        ) sn ON sn.chat_id = u.chat_id
+        LEFT JOIN (
+            SELECT chat_id, COUNT(*) as request_count 
+            FROM request_logs 
+            GROUP BY chat_id
+        ) r ON r.chat_id = u.chat_id
         ORDER BY u.created_at DESC
     ''', conn)
     conn.close()
@@ -154,26 +187,30 @@ with tab_overview:
     st.subheader("Уведомления по дням")
     if not df_notifications.empty:
         df_notif_daily = df_notifications.copy()
-        df_notif_daily['date'] = pd.to_datetime(df_notif_daily['sent_at']).dt.date
-        notif_by_day = df_notif_daily.groupby('date').size().reset_index(name='count')
-        st.bar_chart(notif_by_day.set_index('date'), height=250)
+        df_notif_daily['date'] = pd.to_datetime(pd.to_datetime(df_notif_daily['sent_at']).dt.date)
+        notif_by_day = df_notif_daily.groupby('date').size().reset_index(name='Уведомления')
+        st.bar_chart(notif_by_day, x='date', y='Уведомления', height=250)
     else:
         st.info("Нет данных")
 
     st.subheader("Запросы по дням")
     if not df_logs.empty:
         df_logs_daily = df_logs.copy()
-        df_logs_daily['date'] = pd.to_datetime(df_logs_daily['timestamp']).dt.date
+        df_logs_daily['date'] = pd.to_datetime(pd.to_datetime(df_logs_daily['timestamp']).dt.date)
         logs_by_day = df_logs_daily.groupby(['date', 'found_status']).size().reset_index(name='count')
-        pivot = logs_by_day.pivot(index='date', columns='found_status', values='count').fillna(0)
-        pivot.columns = ['Не найдено', 'Найдено']
-        st.bar_chart(pivot, height=250)
+        pivot = logs_by_day.pivot(index='date', columns='found_status', values='count').fillna(0).reset_index()
+        # Ensure standard column naming
+        cols_map = {0: 'Не найдено', 1: 'Найдено'}
+        pivot = pivot.rename(columns=cols_map)
+        y_cols = [c for c in ['Не найдено', 'Найдено'] if c in pivot.columns]
+        st.bar_chart(pivot, x='date', y=y_cols, height=250)
     else:
         st.info("Нет данных")
 
     st.subheader("Топ районов")
-    district_counts = df_addresses['district'].value_counts().head(10)
-    st.bar_chart(district_counts, height=250)
+    district_counts = df_addresses['district'].value_counts().head(10).reset_index()
+    district_counts.columns = ['Район', 'Количество']
+    st.bar_chart(district_counts, x='Район', y='Количество', height=250)
 
 with tab_users:
     status_filter = st.radio("Фильтр", ["Все", "Активные", "Заблокированные"], horizontal=True)
@@ -189,18 +226,30 @@ with tab_users:
     if search_id:
         filtered = filtered[filtered['chat_id'].astype(str).str.contains(search_id)]
 
-    display = filtered.rename(columns={
-        'chat_id': 'Chat ID', 'bot_blocked': 'Заблокирован',
-        'created_at': 'Зарегистрирован', 'address_count': 'Адресов'
+    filtered_display = filtered.copy()
+    filtered_display['created_at'] = filtered_display['created_at'].apply(format_ru_date)
+
+    display = filtered_display.rename(columns={
+        'chat_id': 'Chat ID', 
+        'bot_blocked': 'Заблокирован',
+        'created_at': 'Зарегистрирован', 
+        'address_count': 'Адресов',
+        'notif_count': 'Уведомлений',
+        'request_count': 'Запросов'
     })
     display['Заблокирован'] = display['Заблокирован'].map({0: 'Нет', 1: 'Да'})
-    st.dataframe(display, width='stretch', hide_index=True)
+    st.dataframe(
+        display[['Chat ID', 'Заблокирован', 'Зарегистрирован', 'Адресов', 'Уведомлений', 'Запросов']], 
+        width='stretch', 
+        hide_index=True
+    )
 
     st.divider()
     st.subheader("Адреса выбранного пользователя")
     user_ids = st.multiselect("Выберите chat_id", options=sorted(df_users['chat_id'].tolist()))
     if user_ids:
-        user_addrs = df_addresses[df_addresses['chat_id'].isin(user_ids)]
+        user_addrs = df_addresses[df_addresses['chat_id'].isin(user_ids)].copy()
+        user_addrs['created_at'] = user_addrs['created_at'].apply(format_ru_date)
         st.dataframe(
             user_addrs[['id', 'district', 'street', 'created_at']].rename(columns={
                 'id': 'ID', 'district': 'Район', 'street': 'Улица', 'created_at': 'Добавлен'
@@ -217,8 +266,11 @@ with tab_addresses:
     if sel_district != "Все":
         filtered_addr = filtered_addr[filtered_addr['district'] == sel_district]
 
+    filtered_addr_display = filtered_addr.copy()
+    filtered_addr_display['created_at'] = filtered_addr_display['created_at'].apply(format_ru_date)
+
     st.dataframe(
-        filtered_addr[['id', 'chat_id', 'district', 'street', 'created_at']].rename(columns={
+        filtered_addr_display[['id', 'chat_id', 'district', 'street', 'created_at']].rename(columns={
             'id': 'ID', 'chat_id': 'Chat ID', 'district': 'Район',
             'street': 'Улица', 'created_at': 'Добавлен'
         }),
@@ -238,9 +290,12 @@ with tab_notif:
     if notif_filter:
         filtered_notif = filtered_notif[filtered_notif['chat_id'].astype(str).str.contains(notif_filter)]
 
-    display_notif = filtered_notif.rename(columns={
+    filtered_notif_display = filtered_notif.copy()
+    filtered_notif_display['sent_at'] = filtered_notif_display['sent_at'].apply(lambda x: format_ru_date(x, include_time=True))
+
+    display_notif = filtered_notif_display.rename(columns={
         'chat_id': 'Chat ID', 'address_id': 'ID адреса',
-        'schedule_hash': 'Хэш', 'sent_at': 'Отправлено',
+        'schedule_hash': 'Хэш', 'sent_at': 'Отправлено (ЯКТ)',
         'district': 'Район', 'street': 'Улица'
     })
     st.dataframe(display_notif, width='stretch', hide_index=True)
@@ -256,12 +311,12 @@ with tab_tickets:
 
     for _, row in filtered_tickets.iterrows():
         with st.container(border=True):
-            st.markdown(f"**Тикет #{row['id']}** — Chat ID: `{row['chat_id']}` — {row['created_at']}")
+            st.markdown(f"**Тикет #{row['id']}** — Chat ID: `{row['chat_id']}` — {format_ru_date(row['created_at'], include_time=True)}")
             if row['user_username']:
                 st.markdown(f"Username: @{row['user_username']}")
             st.markdown(f"**Сообщение:** {row['user_message']}")
             if pd.notna(row['admin_reply']):
-                st.success(f"**Ответ:** {row['admin_reply']} ({row['replied_at']})")
+                st.success(f"**Ответ:** {row['admin_reply']} ({format_ru_date(row['replied_at'], include_time=True)})")
             else:
                 reply_key = f"reply_{row['id']}"
                 reply_text = st.text_area("Ваш ответ:", key=f"input_{row['id']}", label_visibility="collapsed")
@@ -296,8 +351,11 @@ with tab_logs:
     elif status_filter_log == "Не найдено":
         filtered_logs = filtered_logs[filtered_logs['found_status'] == 0]
 
-    display_logs = filtered_logs.drop(columns=['timestamp_dt']).rename(columns={
-        'id': 'ID', 'timestamp': 'Время', 'chat_id': 'Chat ID',
+    filtered_logs_display = filtered_logs.copy()
+    filtered_logs_display['timestamp'] = filtered_logs_display['timestamp'].apply(lambda x: format_ru_date(x, include_time=True))
+
+    display_logs = filtered_logs_display.drop(columns=['timestamp_dt']).rename(columns={
+        'id': 'ID', 'timestamp': 'Время (ЯКТ)', 'chat_id': 'Chat ID',
         'query_details': 'Запрос', 'found_status': 'Найдено'
     })
     display_logs['Найдено'] = display_logs['Найдено'].map({0: 'Нет', 1: 'Да'})

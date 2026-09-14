@@ -4,7 +4,7 @@ import re
 import os
 import hashlib
 from dotenv import load_dotenv
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, date, time, timedelta, timezone
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, 
@@ -46,15 +46,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     addresses = database.get_user_addresses(chat_id)
     if addresses:
-        addr_list = "\n".join([f"  {i+1}. {a[2]}" for i, a in enumerate(addresses)])
-        msg = f"У вас отслеживается {len(addresses)} адресов:\n{addr_list}"
+        addr_list = "\n".join([f"  • [{a[1]}] {a[2]}" for a in addresses])
+        msg = f"📍 *Ваши сохранённые адреса ({len(addresses)}/{database.MAX_ADDRESSES}):*\n{addr_list}"
     else:
-        msg = "У вас пока нет адресов для отслеживания."
+        msg = "📍 *У вас пока нет сохранённых адресов для отслеживания.*"
     await update.message.reply_text(
-        f"Привет! Я бот для уведомления о плановых отключениях электроэнергии Якутскэнерго.\n\n{msg}\n\n"
-        "Добавьте адрес кнопкой «➕ Добавить адрес».\n"
-        "Проверить — «🔍 Проверить сейчас».",
-        reply_markup=get_main_keyboard()
+        f"👋 *Привет! Я бот для оповещения о плановых отключениях электроэнергии ПАО «Якутскэнерго».*\n\n"
+        f"{msg}\n\n"
+        "⚡️ *Как пользоваться:*\n"
+        "• *➕ Добавить адрес* — укажите улицу и дом (г. Якутск или районы РС(Я))\n"
+        "• *🔍 Проверить сейчас* — мгновенная проверка графика по вашим адресам\n"
+        "• *📋 Мои адреса* / *➖ Удалить адрес* — управление списком\n"
+        "• *⏰ Авто-уведомления* приходят в 10:00 и 22:00 (YKT)\n\n"
+        "Для добавления нажмите кнопку ниже 👇",
+        reply_markup=get_main_keyboard(),
+        parse_mode='Markdown'
     )
 
 async def start_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -243,7 +249,6 @@ async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_cooldowns[user_id] = now
     await update.message.reply_text("Запускаю проверку обновлений...")
     await check_updates(context.application, target_chat_id=update.effective_chat.id, is_manual=True)
-    await update.message.reply_text("Проверка завершена.")
 
 async def cmd_list_addresses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     addresses = database.get_user_addresses(update.effective_chat.id)
@@ -682,6 +687,50 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
     for chat_id, aid, dist, street in all_addresses:
         user_addresses[chat_id].append((aid, dist, street))
 
+    # Сбор дат расписания и подсчёт записей для отчёта
+    matched_dates = set()
+    schedules_on_date = 0
+    for s in schedules:
+        s_date = parse_russian_date(s['date'], ref_date=now_ykt)
+        if not s_date:
+            continue
+        if force_date:
+            if s_date == force_date:
+                schedules_on_date += 1
+                matched_dates.add(s_date)
+        else:
+            if s_date >= today:
+                schedules_on_date += 1
+                matched_dates.add(s_date)
+
+    if force_date:
+        date_str = force_date.strftime("%d.%m.%Y")
+    elif matched_dates:
+        date_str = ", ".join(d.strftime("%d.%m.%Y") for d in sorted(matched_dates))
+    else:
+        date_str = today.strftime("%d.%m.%Y")
+
+    total_matches_count = 0
+    users_notified_count = 0
+    user_matches_count = 0
+
+    if target_chat_id and not user_addresses:
+        try:
+            await application.bot.send_message(
+                chat_id=target_chat_id,
+                text="У вас пока нет сохранённых адресов. Нажмите «➕ Добавить адрес»."
+            )
+        except Exception as e:
+            logging.error(f"Error sending empty addresses message to {target_chat_id}: {e}")
+        return {
+            "date_str": date_str,
+            "total_schedules": len(schedules),
+            "target_date_schedules": schedules_on_date,
+            "total_matches": 0,
+            "users_notified": 0,
+            "user_matches_found": 0,
+        }
+
     for chat_id, addresses in user_addresses.items():
         if database.is_blocked(chat_id):
             continue
@@ -715,13 +764,17 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
                         all_matches.append((s, street, aid, s_hash))
 
         if all_matches:
+            total_matches_count += len(all_matches)
+            if target_chat_id:
+                user_matches_count = len(all_matches)
+
             # Группируем записи по адресу
             from collections import defaultdict
             by_address = defaultdict(list)
             for m, street, aid, s_hash in all_matches:
                 by_address[street].append((m, aid, s_hash))
 
-            msg = "⚠️ *Внимание! Обнаружены плановые работы:*\n\n"
+            msg = f"⚠️ *Внимание! Обнаружены плановые работы:*\n📅 *Проверены списки за:* {date_str}\n\n"
             seen_hashes = set()
             for street, entries in by_address.items():
                 for m, aid, s_hash in entries:
@@ -735,6 +788,7 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
 
             try:
                 await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                users_notified_count += 1
             except Exception as e:
                 err = str(e).lower()
                 if "blocked" in err or "deactivated" in err:
@@ -745,11 +799,18 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
                 logging.error(f"Error sending message to {chat_id}: {e}")
 
             matched_aids = {aid for _, _, aid, _ in all_matches}
-            for aid, district, street in addresses:
-                database.log_request(chat_id, f"Улица: {street}", aid in matched_aids)
+            if is_manual:
+                for aid, district, street in addresses:
+                    database.log_request(chat_id, f"Улица: {street}", aid in matched_aids)
         elif target_chat_id:
             try:
-                await application.bot.send_message(chat_id=chat_id, text="✅ Работ не найдено.")
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"✅ *Проверка проведена без ошибок.*\n\n"
+                         f"📅 Проверены списки за: *{date_str}*\n"
+                         f"🔍 Совпадений по вашим адресам не найдено.",
+                    parse_mode='Markdown'
+                )
             except Exception as e:
                 err = str(e).lower()
                 if "blocked" in err or "deactivated" in err:
@@ -758,55 +819,130 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
                     except Exception:
                         pass
                 logging.error(f"Error sending to {chat_id}: {e}")
-            for aid, district, street in addresses:
-                database.log_request(chat_id, f"Улица: {street}", False)
+            if is_manual:
+                for aid, district, street in addresses:
+                    database.log_request(chat_id, f"Улица: {street}", False)
+
+    return {
+        "date_str": date_str,
+        "total_schedules": len(schedules),
+        "target_date_schedules": schedules_on_date,
+        "total_matches": total_matches_count,
+        "users_notified": users_notified_count,
+        "user_matches_found": user_matches_count,
+    }
+
+
+async def notify_admin_check_result(application, check_date, stats):
+    if not ADMIN_TG_ID:
+        return
+    try:
+        admin_id = int(ADMIN_TG_ID)
+        date_str = check_date.strftime("%d.%m.%Y") if isinstance(check_date, (date, datetime)) else str(check_date)
+
+        target_schedules = stats.get("target_date_schedules", 0) if stats else 0
+        total_schedules = stats.get("total_schedules", 0) if stats else 0
+        total_matches = stats.get("total_matches", 0) if stats else 0
+        users_notified = stats.get("users_notified", 0) if stats else 0
+
+        if total_matches > 0:
+            matches_text = f"найдено: *{total_matches}* (уведомлено пользователей: *{users_notified}*)"
+        else:
+            matches_text = "совпадений не найдено"
+
+        text = (
+            f"✅ *Плановая проверка Якутскэнерго*\n\n"
+            f"Проверка проведена без ошибок.\n"
+            f"📅 Проверены списки за: *{date_str}*\n"
+            f"📋 Записей в графике на дату: *{target_schedules}* (всего спарсено: {total_schedules})\n"
+            f"🔍 Совпадений по адресам: {matches_text}"
+        )
+        await application.bot.send_message(chat_id=admin_id, text=text, parse_mode='Markdown')
+    except Exception as e:
+        logging.error(f"Failed to send admin check notification: {e}")
+
+
+async def notify_admin_check_error(application, check_date, error_exc):
+    if not ADMIN_TG_ID:
+        return
+    try:
+        admin_id = int(ADMIN_TG_ID)
+        date_str = check_date.strftime("%d.%m.%Y") if isinstance(check_date, (date, datetime)) else str(check_date)
+        text = (
+            f"❌ *Ошибка при плановой проверке Якутскэнерго*\n\n"
+            f"📅 Проверялась дата: *{date_str}*\n"
+            f"⚠️ Ошибка: `{str(error_exc)[:300]}`"
+        )
+        await application.bot.send_message(chat_id=admin_id, text=text, parse_mode='Markdown')
+    except Exception as e:
+        logging.error(f"Failed to send admin error notification: {e}")
+
+
+async def global_error_handler(update, context):
+    """Logs unhandled errors and network timeouts gracefully."""
+    logging.error(f"Global telegram update error: {context.error}", exc_info=context.error)
+
+
+scheduler_job = None
 
 async def scheduler_task(application):
     ykt_tz = timezone(timedelta(hours=9))
-    while True:
-        now_ykt = datetime.now(ykt_tz)
-        today = now_ykt.date()
-        tomorrow = today + timedelta(days=1)
+    try:
+        while True:
+            now_ykt = datetime.now(ykt_tz)
+            today = now_ykt.date()
+            tomorrow = today + timedelta(days=1)
 
-        # Define target times in YKT
-        t10 = now_ykt.replace(hour=10, minute=0, second=0, microsecond=0)
-        t22 = now_ykt.replace(hour=22, minute=0, second=0, microsecond=0)
+            # Define target times in YKT
+            t10 = now_ykt.replace(hour=10, minute=0, second=0, microsecond=0)
+            t22 = now_ykt.replace(hour=22, minute=0, second=0, microsecond=0)
 
-        # Проверяем на сегодня, если 10:00 ещё не прошло
-        if now_ykt < t10:
-            wait_seconds = (t10 - now_ykt).total_seconds()
-            logging.info(f"Next run at {t10} (YKT), checking today. Waiting {wait_seconds}s")
+            # Проверяем на сегодня, если 10:00 ещё не прошло
+            if now_ykt < t10:
+                wait_seconds = (t10 - now_ykt).total_seconds()
+                logging.info(f"Next run at {t10} (YKT), checking today. Waiting {wait_seconds}s")
+                await asyncio.sleep(wait_seconds)
+                try:
+                    stats = await check_updates(application, force_date=today)
+                    await notify_admin_check_result(application, today, stats)
+                except Exception as e:
+                    logging.error(f"Scheduler check (today) failed: {e}", exc_info=True)
+                    await notify_admin_check_error(application, today, e)
+
+            # Проверяем на завтра в 10:00 (если 10:00 уже прошло сегодня)
+            # или в 22:00 (если между 10:00 и 22:00)
+            if now_ykt < t22:
+                wait_seconds = (t22 - now_ykt).total_seconds()
+                logging.info(f"Next run at {t22} (YKT), checking tomorrow. Waiting {wait_seconds}s")
+                await asyncio.sleep(wait_seconds)
+                try:
+                    stats = await check_updates(application, force_date=tomorrow)
+                    await notify_admin_check_result(application, tomorrow, stats)
+                except Exception as e:
+                    logging.error(f"Scheduler check (tomorrow evening) failed: {e}", exc_info=True)
+                    await notify_admin_check_error(application, tomorrow, e)
+
+            # Если оба времени прошли, ждём до завтра 10:00
+            next_t10 = t10 + timedelta(days=1)
+            wait_seconds = (next_t10 - datetime.now(ykt_tz)).total_seconds()
+            logging.info(f"Next run at {next_t10} (YKT), checking tomorrow. Waiting {wait_seconds}s")
             await asyncio.sleep(wait_seconds)
             try:
-                await check_updates(application, force_date=today)
+                stats = await check_updates(application, force_date=tomorrow)
+                await notify_admin_check_result(application, tomorrow, stats)
             except Exception as e:
-                logging.error(f"Scheduler check (today) failed: {e}", exc_info=True)
+                logging.error(f"Scheduler check (next morning) failed: {e}", exc_info=True)
+                await notify_admin_check_error(application, tomorrow, e)
 
-        # Проверяем на завтра в 10:00 (если 10:00 уже прошло сегодня)
-        # или в 22:00 (если между 10:00 и 22:00)
-        if now_ykt < t22:
-            wait_seconds = (t22 - now_ykt).total_seconds()
-            logging.info(f"Next run at {t22} (YKT), checking tomorrow. Waiting {wait_seconds}s")
-            await asyncio.sleep(wait_seconds)
-            try:
-                await check_updates(application, force_date=tomorrow)
-            except Exception as e:
-                logging.error(f"Scheduler check (tomorrow evening) failed: {e}", exc_info=True)
-
-        # Если оба времени прошли, ждём до завтра 10:00
-        next_t10 = t10 + timedelta(days=1)
-        wait_seconds = (next_t10 - datetime.now(ykt_tz)).total_seconds()
-        logging.info(f"Next run at {next_t10} (YKT), checking tomorrow. Waiting {wait_seconds}s")
-        await asyncio.sleep(wait_seconds)
-        try:
-            await check_updates(application, force_date=tomorrow)
-        except Exception as e:
-            logging.error(f"Scheduler check (next morning) failed: {e}", exc_info=True)
-
-        # Small sleep to prevent immediate re-triggering
-        await asyncio.sleep(60)
+            # Small sleep to prevent immediate re-triggering
+            await asyncio.sleep(60)
+    except asyncio.CancelledError:
+        logging.info("Scheduler task cancelled cleanly for shutdown.")
+        raise
 
 async def post_init(application):
+    global scheduler_job
+    scheduler_job = asyncio.create_task(scheduler_task(application))
     await application.bot.set_my_commands([
         ("start", "Меню"),
         ("add", "Добавить адрес"),
@@ -814,10 +950,42 @@ async def post_init(application):
         ("list", "Мои адреса"),
         ("check", "Проверить сейчас"),
     ])
+    try:
+        await application.bot.set_my_description(
+            "💡 Бот для отслеживания плановых отключений электроэнергии по данным ПАО «Якутскэнерго» в г. Якутске и улусах Якутии.\n\n"
+            "📌 Возможности:\n"
+            "• Добавление до 5 адресов для мониторинга\n"
+            "• Автоматические уведомления накануне и в день отключения\n"
+            "• Ручная проверка отключений по кнопке\n\n"
+            "Нажмите «Начать» (Start) для запуска!"
+        )
+        await application.bot.set_my_short_description(
+            "Уведомления о плановых отключениях электроэнергии в Якутске и районах Якутии (Якутскэнерго)."
+        )
+    except Exception as e:
+        logging.warning(f"Failed to set bot descriptions: {e}")
+
+async def post_shutdown(application):
+    global scheduler_job
+    if scheduler_job and not scheduler_job.done():
+        logging.info("Cancelling scheduler task on shutdown...")
+        scheduler_job.cancel()
+        try:
+            await scheduler_job
+        except asyncio.CancelledError:
+            pass
+        logging.info("Scheduler task stopped cleanly.")
 
 if __name__ == '__main__':
     database.init_db()
-    application = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    application = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+    application.add_error_handler(global_error_handler)
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('➕ Добавить адрес'), start_setup)],
         states={
@@ -843,6 +1011,4 @@ if __name__ == '__main__':
     ))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    loop = asyncio.get_event_loop()
-    loop.create_task(scheduler_task(application))
     application.run_polling()
