@@ -374,14 +374,19 @@ def build_street_pattern(core_name):
 _ADDR_REPLACE = {
     "переулок": "пер", "микрорайон": "мкр", "набережная": "наб",
     "товарищество": "ст", "километр": "км", "проспект": "пр",
+    "просп": "пр", "пр-т": "пр", "пр": "пр",
     "бульвар": "б-р", "площадь": "пл", "проезд": "пр-д",
-    "участок": "уч", "корпус": "корп", "улица": "ул",
+    "пр-д": "пр-д", "участок": "уч", "корпус": "корп", "улица": "ул",
     "шоссе": "ш", "тупик": "туп", "тракт": "тр",
-    "бул": "б-р", "пр": "пр-д",
+    "бул": "б-р",
 }
 
 _ADDR_PATTERN = re.compile(
     r'\b(' + '|'.join(re.escape(k) for k in sorted(_ADDR_REPLACE, key=len, reverse=True)) + r')\b'
+)
+
+_HOUSE_RANGE_PATTERN = re.compile(
+    r'(?<![\d/])(\d+)(?:\s*(?!км\b)[а-я]|\s*/\s*\d+[а-я]?)?\s*[-–]\s*(\d+)(?:\s*(?!км\b)[а-я]|\s*/\s*\d+[а-я]?)?(?![\d/])(?!\s*км\b)'
 )
 
 
@@ -395,6 +400,7 @@ def normalize_address(text):
     text = _ADDR_PATTERN.sub(lambda m: _ADDR_REPLACE[m.group(1)], text)
     text = re.sub(r'\bкорп\b', ' корп ', text)
     text = re.sub(r'[^а-я0-9\s\/\-–]', '', text)
+    text = re.sub(r'(\d+)\s+([а-я])(?=[\s,;\-–/]|$)', r'\1\2', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def parse_russian_date(date_str, ref_date=None):
@@ -419,7 +425,7 @@ def parse_russian_date(date_str, ref_date=None):
         return datetime(year, month, day).date()
     except: return None
 
-def parse_user_address(street):
+def parse_user_address_v1(street):
     original_lower = street.lower()
     korpus_val = None
     mkr_val = None
@@ -506,7 +512,7 @@ def parse_user_address(street):
                 if m:
                     result['main_house'] = int(m.group(1))
                     result['sub_house'] = m.group(2) or None
-    core = re.sub(r'\b(ул|пер|пр|ш|наб|пл|пр-д|туп|б-р|тр|мкр|корп|снт|сот|днт|гсп|км)\b', '', result['street_name']).strip()
+    core = re.sub(r'\b(пр-д|б-р|ул|пер|пр|ш|наб|пл|туп|тр|мкр|корп|снт|сот|днт|гсп|км)\b', '', result['street_name']).strip()
     if mkr_val:
         result['core_name'] = mkr_val
     elif core:
@@ -524,12 +530,13 @@ def extract_street_houses(norm):
         return '', ''
     house_start = len(tokens)
     for i, tok in enumerate(tokens):
-        if re.match(r'^\d+[/–-]', tok):
+        if re.match(r'^\d+[а-я]?[/–-]', tok):
             house_start = i
             break
         if re.match(r'^\d+[а-я]$', tok):
-            house_start = i
-            break
+            if i == len(tokens) - 1 or re.match(r'^[\d/–-]+[а-я]?$', tokens[i + 1]):
+                house_start = i
+                break
         if re.match(r'^\d+$', tok):
             if i == len(tokens) - 1:
                 house_start = i
@@ -543,7 +550,7 @@ def extract_street_houses(norm):
     return ' '.join(street_tokens), ' '.join(house_tokens)
 
 
-def split_schedule_addresses(addr_string):
+def split_schedule_addresses_v1(addr_string):
     norm = normalize_address(addr_string)
     norm = re.sub(r'(\d+)\s*[–-]\s*(?=\d)', r'\1-', norm)
     raw_parts = re.split(r',\s*(?=[А-Яа-яЁё])', addr_string)
@@ -571,7 +578,7 @@ def split_schedule_addresses(addr_string):
             km_value = int(km_single_m.group(1))
             street_part = street_name
         houses_part = re.sub(r'\b\d+\s*(?:-\s*\d+)?\s*км\b', '', houses).strip()
-        houses_part = re.sub(r'\b(ул|пер|пр|ш|наб|пл|пр-д|туп|б-р|тр|мкр|корп|снт|сот|днт|гсп|км)\b', '', houses_part).strip()
+        houses_part = re.sub(r'\b(пр-д|б-р|ул|пер|пр|ш|наб|пл|туп|тр|мкр|корп|снт|сот|днт|гсп|км)\b', '', houses_part).strip()
         groups.append({
             'street_norm': street_part,
             'km_value': km_value,
@@ -594,7 +601,7 @@ def split_schedule_addresses(addr_string):
     return groups
 
 
-def match_address_against_schedule(ua, norm_user_district, s, addr_groups):
+def match_address_against_schedule_v1(ua, norm_user_district, s, addr_groups):
     if norm_user_district not in normalize_district(s['district']):
         return False
     if ua['core_name'] is None:
@@ -642,13 +649,16 @@ def match_address_against_schedule(ua, norm_user_district, s, addr_groups):
                     else:
                         return True
                 else:
-                    range_matches = re.finditer(r'(\d+)\s*[–-]\s*(\d+)', grp['houses'])
+                    range_matches = _HOUSE_RANGE_PATTERN.finditer(grp['houses'])
                     for rm in range_matches:
                         try:
                             lo, hi = int(rm.group(1)), int(rm.group(2))
+                            if lo > hi:
+                                lo, hi = hi, lo
                             if lo <= match_house <= hi:
                                 return True
-                        except: pass
+                        except Exception:
+                            pass
                 if ua['sub_house'] is None:
                     sub_match = re.search(r'\b' + str(match_house) + r'/\S+', grp['full_norm'])
                     if sub_match:
@@ -660,13 +670,48 @@ def match_address_against_schedule(ua, norm_user_district, s, addr_groups):
                                 return True
                         else:
                             return True
-                if "частич" in grp['full_norm'] or "полн" in grp['full_norm']:
-                    return True
-                elif not re.search(r'\d', grp['houses']):
+                # Если для улицы в графике не указаны конкретные номера домов, уведомляем всех жителей улицы
+                if not re.search(r'\d', grp['houses']):
                     return True
             else:
                 return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Единый роутер парсера адресов (V2 по умолчанию, V1 сохранен для обратной совместимости)
+# ---------------------------------------------------------------------------
+import address_parser_v2 as parser_v2
+
+ADDRESS_PARSER_MODE = os.getenv("ADDRESS_PARSER_MODE", "v2").lower()
+
+
+def parse_user_address(street):
+    if ADDRESS_PARSER_MODE == "v1":
+        return parse_user_address_v1(street)
+    ua_v2 = parser_v2.parse_user_address(street)
+    return ua_v2.to_legacy_dict()
+
+
+def split_schedule_addresses(addr_string):
+    if ADDRESS_PARSER_MODE == "v1":
+        return split_schedule_addresses_v1(addr_string)
+    return parser_v2.split_schedule_addresses(addr_string)
+
+
+def match_address_against_schedule(ua, norm_user_district, s, addr_groups):
+    if ADDRESS_PARSER_MODE == "v1":
+        return match_address_against_schedule_v1(ua, norm_user_district, s, addr_groups)
+    matched = parser_v2.match_address_against_schedule(ua, norm_user_district, s, addr_groups)
+    if ADDRESS_PARSER_MODE == "shadow":
+        legacy_matched = match_address_against_schedule_v1(ua, norm_user_district, s, addr_groups)
+        if matched != legacy_matched:
+            logging.info(
+                f"[PARSER_DIFF] V1={legacy_matched} vs V2={matched} | "
+                f"User='{ua.get('street_name')}' in '{s.get('addresses', '')[:50]}...'"
+            )
+        return legacy_matched
+    return matched
 
 
 async def check_updates(application, target_chat_id=None, force_date=None, is_manual=False):
@@ -782,9 +827,10 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
                         continue
                     if s_hash:
                         seen_hashes.add((aid, s_hash))
-                    msg += f"📍 *Адрес:* {street}\n📅 *Дата:* {m['date']}\n🕒 *Время:* {m['time']}\n🏠 *Где:* {m['addresses']}\n🛠 *Причина:* {m['reason']}\n\n"
+                    entry_text = f"📅 Дата: {m['date']}\n🕒 Время: {m['time']}\n🏠 Где: {m['addresses']}\n🛠 Причина: {m['reason']}"
+                    msg += f"📍 *Адрес:* {street}\n{entry_text}\n\n"
                     if s_hash:
-                        database.mark_as_notified(chat_id, aid, s_hash)
+                        database.mark_as_notified(chat_id, aid, s_hash, message_text=entry_text)
 
             try:
                 await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')

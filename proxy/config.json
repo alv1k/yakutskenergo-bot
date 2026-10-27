@@ -27,7 +27,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "139.100.207.18",
+            "address": "10.50.0.2",
             "port": 8443,
             "users": [
               {
@@ -37,6 +37,10 @@
             ]
           }
         ]
+      },
+      "mux": {
+        "enabled": false,
+        "concurrency": -1
       },
       "streamSettings": {
         "network": "ws",

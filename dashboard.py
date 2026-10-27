@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from dotenv import load_dotenv
 import streamlit as st
@@ -7,11 +8,26 @@ import sqlite3
 import hashlib
 from datetime import datetime, timedelta
 
+# Local application modules
+import scraper
+from bot import (
+    parse_user_address,
+    parse_user_address_v1,
+    normalize_district,
+    split_schedule_addresses,
+    split_schedule_addresses_v1,
+    match_address_against_schedule,
+    match_address_against_schedule_v1,
+    build_street_pattern,
+    normalize_address,
+)
+import address_parser_v2 as parser_v2
+
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-DB_NAME = 'bot_database.db'
-PASSWORD_HASH = "5ef8b46fd33d194c94af08922dd369f90ed597504dc0b22697f97d95f60bba3a"
+DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot_database.db')
+PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "b236e2387136965e45af21ba55b037c0fd413acf727a98affd5d339ab201fbfe")
 
 MONTHS_RU = {
     1: 'янв', 2: 'фев', 3: 'мар', 4: 'апр', 5: 'май', 6: 'июн',
@@ -95,6 +111,7 @@ def load_notifications():
     conn = get_conn()
     df = pd.read_sql('''
         SELECT sn.chat_id, sn.address_id, sn.schedule_hash, sn.sent_at,
+               COALESCE(NULLIF(sn.message_text, ''), '— (текст в БД не логировался)') as message_text,
                a.district, a.street
         FROM sent_notifications sn
         LEFT JOIN addresses a ON a.id = sn.address_id
@@ -155,10 +172,94 @@ def reply_to_ticket(ticket_id, chat_id, reply_text):
     st.cache_data.clear()
     return True
 
+@st.cache_data(ttl=60)
+def check_proxy_and_site_status():
+    url = scraper.NEWS_LIST_URL
+    proxies = scraper.PROXIES
+    headers = scraper.HEADERS
+    t0 = time.time()
+    try:
+        resp = requests.get(url, proxies=proxies, headers=headers, verify=False, timeout=8)
+        latency = int((time.time() - t0) * 1000)
+        return {
+            "proxy_ok": True,
+            "site_ok": resp.status_code == 200,
+            "status_code": resp.status_code,
+            "latency_ms": latency,
+            "error": None
+        }
+    except Exception as e:
+        latency = int((time.time() - t0) * 1000)
+        return {
+            "proxy_ok": False,
+            "site_ok": False,
+            "status_code": 0,
+            "latency_ms": latency,
+            "error": str(e)
+        }
+
+@st.cache_data(ttl=300)
+def load_schedules():
+    try:
+        return scraper.get_all_recent_schedules()
+    except Exception as e:
+        st.error(f"Ошибка загрузки графика: {e}")
+        return []
+
 st.set_page_config(page_title="Якутскэнерго — Дашборд", layout="wide", page_icon="favicon.png")
 
 if not check_password():
     st.stop()
+
+# --- Боковая панель: Мониторинг прокси, бэкап и управление ---
+with st.sidebar:
+    st.header("⚡ Состояние системы")
+    status_info = check_proxy_and_site_status()
+    
+    if status_info["site_ok"]:
+        st.success(f"🟢 **Сайт Якутскэнерго:** {status_info['status_code']} OK ({status_info['latency_ms']} мс)")
+    elif status_info["proxy_ok"]:
+        st.warning(f"🟡 **Сайт вернул код:** {status_info['status_code']} ({status_info['latency_ms']} мс)")
+    else:
+        st.error(f"🔴 **Ошибка подключения к сайту/прокси**\n`{status_info['error']}`")
+
+    # Состояние кеша скрейпера
+    cache_entries = len(scraper._cache['data']) if scraper._cache['data'] else 0
+    cache_age_sec = int(time.time() - scraper._cache['timestamp']) if scraper._cache['timestamp'] else None
+    
+    st.caption(f"**В кеше:** {cache_entries} записей")
+    if cache_age_sec is not None and cache_age_sec < 86400:
+        st.caption(f"**Возраст кеша:** {cache_age_sec // 60} мин {cache_age_sec % 60} сек")
+
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("🔄 Связь", help="Перепроверить доступность сайта и прокси"):
+            check_proxy_and_site_status.clear()
+            st.rerun()
+    with col_btn2:
+        if st.button("⚡ Сброс кеша", help="Сбросить кеш и спарсить свежий график с сайта"):
+            scraper._cache['data'] = None
+            scraper._cache['timestamp'] = 0
+            load_schedules.clear()
+            st.rerun()
+
+    st.divider()
+    st.subheader("📦 База данных")
+    if os.path.exists(DB_NAME):
+        with open(DB_NAME, "rb") as f:
+            db_bytes = f.read()
+        st.download_button(
+            label="💾 Скачать бэкап БД",
+            data=db_bytes,
+            file_name=f"bot_database_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+            mime="application/x-sqlite3",
+            width='stretch'
+        )
+
+    st.divider()
+    if st.button("🚪 Выйти из системы", width='stretch'):
+        st.session_state.logged_in = False
+        st.rerun()
 
 st.title("Якутскэнерго — панель управления ботом")
 
@@ -168,8 +269,17 @@ df_notifications = load_notifications()
 df_logs = load_request_logs()
 df_tickets = load_tickets()
 
-tab_overview, tab_users, tab_addresses, tab_notif, tab_tickets, tab_logs = \
-    st.tabs(["Обзор", "Пользователи", "Адреса", "Уведомления", "Тикеты", "Лог запросов"])
+tab_overview, tab_schedule, tab_matcher, tab_users, tab_addresses, tab_notif, tab_tickets, tab_logs = \
+    st.tabs([
+        "Обзор", 
+        "Текущий график", 
+        "Песочница адресов", 
+        "Пользователи", 
+        "Адреса", 
+        "Уведомления", 
+        "Тикеты", 
+        "Лог запросов"
+    ])
 
 with tab_overview:
     col1, col2, col3, col4 = st.columns(4)
@@ -199,7 +309,6 @@ with tab_overview:
         df_logs_daily['date'] = pd.to_datetime(pd.to_datetime(df_logs_daily['timestamp']).dt.date)
         logs_by_day = df_logs_daily.groupby(['date', 'found_status']).size().reset_index(name='count')
         pivot = logs_by_day.pivot(index='date', columns='found_status', values='count').fillna(0).reset_index()
-        # Ensure standard column naming
         cols_map = {0: 'Не найдено', 1: 'Найдено'}
         pivot = pivot.rename(columns=cols_map)
         y_cols = [c for c in ['Не найдено', 'Найдено'] if c in pivot.columns]
@@ -211,6 +320,242 @@ with tab_overview:
     district_counts = df_addresses['district'].value_counts().head(10).reset_index()
     district_counts.columns = ['Район', 'Количество']
     st.bar_chart(district_counts, x='Район', y='Количество', height=250)
+
+# --- ВКЛАДКА: ТЕКУЩИЙ ГРАФИК ---
+with tab_schedule:
+    schedules = load_schedules()
+    st.subheader(f"Текущий график ремонтных работ (в памяти: {len(schedules)})")
+    
+    if not schedules:
+        st.warning("В текущий момент список ремонтных работ пуст или не удалось загрузить данные с сайта.")
+        if st.button("Попробовать загрузить снова"):
+            load_schedules.clear()
+            st.rerun()
+    else:
+        df_sched = pd.DataFrame(schedules)
+        
+        col_sc1, col_sc2, col_sc3 = st.columns([1, 1, 2])
+        with col_sc1:
+            all_districts = sorted(df_sched['district'].unique().tolist())
+            selected_dist = st.selectbox("Фильтр по району:", ["Все"] + all_districts, key="sched_dist_filter")
+        with col_sc2:
+            all_dates = sorted(df_sched['date'].dropna().unique().tolist())
+            selected_date = st.selectbox("Фильтр по дате:", ["Все"] + all_dates, key="sched_date_filter")
+        with col_sc3:
+            sched_search = st.text_input("Поиск по улице, номеру или причине:", key="sched_search_box")
+        
+        filtered_sched = df_sched.copy()
+        if selected_dist != "Все":
+            filtered_sched = filtered_sched[filtered_sched['district'] == selected_dist]
+        if selected_date != "Все":
+            filtered_sched = filtered_sched[filtered_sched['date'] == selected_date]
+        if sched_search:
+            s_mask = (
+                filtered_sched['addresses'].str.contains(sched_search, case=False, na=False) |
+                filtered_sched['reason'].str.contains(sched_search, case=False, na=False) |
+                filtered_sched['time'].str.contains(sched_search, case=False, na=False)
+            )
+            filtered_sched = filtered_sched[s_mask]
+            
+        st.caption(f"Отображается: **{len(filtered_sched)}** из {len(df_sched)} записей")
+        
+        display_sched = filtered_sched.rename(columns={
+            'district': 'Район',
+            'date': 'Дата',
+            'time': 'Время',
+            'addresses': 'Адреса',
+            'reason': 'Причина работ'
+        })
+        
+        st.dataframe(
+            display_sched[['Район', 'Дата', 'Время', 'Адреса', 'Причина работ']],
+            column_config={
+                "Адреса": st.column_config.TextColumn("Адреса", width="large"),
+                "Причина работ": st.column_config.TextColumn("Причина работ", width="medium"),
+            },
+            width='stretch',
+            hide_index=True
+        )
+        
+        # Экспорт отфильтрованного графика в CSV
+        csv_data = filtered_sched.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 Скачать отображаемый график (CSV)",
+            data=csv_data,
+            file_name=f"yakutskenergo_schedule_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+        )
+
+# --- ВКЛАДКА: ПЕСОЧНИЦА АДРЕСОВ (MATCHER SANDBOX) ---
+with tab_matcher:
+    st.subheader("🧪 Песочница проверки адресов (Address Matcher)")
+    st.markdown("Здесь можно проверить, как бот нормализует введенный пользователем адрес и находит ли совпадение в текущем графике.")
+    
+    # Быстрый выбор из существующих адресов в базе
+    addr_options = [("— Ручной ввод —", None)]
+    for _, row in df_addresses.iterrows():
+        label = f"ID #{row['id']}: {row['district']}, {row['street']} (Chat ID: {row['chat_id']})"
+        addr_options.append((label, (row['district'], row['street'])))
+    
+    selected_quick = st.selectbox(
+        "Быстрый выбор из базы пользователей (для разбора жалоб):",
+        options=range(len(addr_options)),
+        format_func=lambda idx: addr_options[idx][0],
+        key="quick_addr_select"
+    )
+    
+    default_dist = "ЯКУТСК"
+    default_str = "Лермонтова 58"
+    
+    if selected_quick > 0:
+        _, val = addr_options[selected_quick]
+        default_dist = val[0]
+        default_str = val[1]
+        
+    col_m1, col_m2 = st.columns([1, 2])
+    with col_m1:
+        test_district = st.text_input("Район:", value=default_dist, key="test_district_val")
+    with col_m2:
+        test_street = st.text_input("Адрес (улица, дом, км):", value=default_str, key="test_street_val")
+
+    matcher_mode = st.radio(
+        "Алгоритм сопоставления:",
+        ["V2 (Интеллектуальный с базой топонимов)", "V1 (Legacy)", "Сравнение V1 vs V2 (Side-by-Side)"],
+        horizontal=True,
+        key="matcher_engine_selector"
+    )
+        
+    if st.button("🔍 Проверить совпадение по графику", type="primary", key="btn_run_matcher"):
+        if not test_street.strip():
+            st.warning("Введите улицу для проверки.")
+        else:
+            with st.spinner("Проверяем алгоритм сопоставления..."):
+                norm_dist = normalize_district(test_district.strip())
+                schedules_data = load_schedules()
+
+                # Разбор обоими парсерами
+                ua_v1 = parse_user_address_v1(test_street.strip())
+                ua_v2 = parser_v2.parse_user_address(test_street.strip(), test_district.strip())
+
+                if matcher_mode == "Сравнение V1 vs V2 (Side-by-Side)":
+                    col_res1, col_res2 = st.columns(2)
+                    
+                    # Левая колонка: V1 Legacy
+                    with col_res1:
+                        st.subheader("🏛️ V1 (Legacy)")
+                        with st.expander("Параметры V1", expanded=False):
+                            st.json(ua_v1)
+                        matches_v1 = []
+                        for s in schedules_data:
+                            if norm_dist not in normalize_district(s['district']):
+                                continue
+                            grps_v1 = split_schedule_addresses_v1(s['addresses'])
+                            if match_address_against_schedule_v1(ua_v1, norm_dist, s, grps_v1):
+                                matches_v1.append(s)
+                        if matches_v1:
+                            st.success(f"🎯 Найдено совпадений: {len(matches_v1)}")
+                            for m in matches_v1:
+                                st.caption(f"⚡ **{m['date']} ({m['time']})**\n{m['addresses']}")
+                        else:
+                            st.info("Совпадений нет")
+
+                    # Правая колонка: V2 Enhanced
+                    with col_res2:
+                        st.subheader("🚀 V2 (Enhanced)")
+                        with st.expander("Параметры V2", expanded=False):
+                            st.json({
+                                "street_name": ua_v2.street_name,
+                                "canonical_name": ua_v2.canonical_name,
+                                "core_name": ua_v2.core_name,
+                                "house_num": ua_v2.house_num,
+                                "main_house": ua_v2.main_house,
+                                "sub_house": ua_v2.sub_house,
+                                "korpus": ua_v2.korpus,
+                                "structure": ua_v2.structure,
+                                "is_km": ua_v2.is_km_address,
+                                "km_value": ua_v2.km_value,
+                                "is_sot": ua_v2.is_sot
+                            })
+                        matches_v2 = []
+                        for s in schedules_data:
+                            if norm_dist not in normalize_district(s['district']):
+                                continue
+                            grps_v2 = parser_v2.split_schedule_addresses_v2(s['addresses'])
+                            res = parser_v2.match_address_detailed(ua_v2, norm_dist, s, grps_v2)
+                            if res.matched:
+                                matches_v2.append((s, res))
+                        if matches_v2:
+                            st.success(f"🎯 Найдено совпадений: {len(matches_v2)}")
+                            for m, res in matches_v2:
+                                st.caption(f"⚡ **{m['date']} ({m['time']})** — *{res.reason}*\n{m['addresses']}")
+                        else:
+                            st.info("Совпадений нет")
+
+                elif matcher_mode == "V1 (Legacy)":
+                    with st.expander("🛠️ Результат нормализации V1 (Legacy)", expanded=True):
+                        st.json(ua_v1)
+                    exact_matches = []
+                    for s in schedules_data:
+                        if norm_dist not in normalize_district(s['district']):
+                            continue
+                        grps_v1 = split_schedule_addresses_v1(s['addresses'])
+                        if match_address_against_schedule_v1(ua_v1, norm_dist, s, grps_v1):
+                            exact_matches.append(s)
+                    if exact_matches:
+                        st.success(f"🎯 **Найдено точных совпадений V1: {len(exact_matches)}**")
+                        for s in exact_matches:
+                            with st.container(border=True):
+                                st.markdown(f"### ⚡ [{s['district']}] {s['date']} с {s['time']}")
+                                st.markdown(f"> {s['addresses']}")
+                    else:
+                        st.info("ℹ️ В текущем графике совпадений не найдено.")
+
+                else:
+                    # Режим V2 (Enhanced)
+                    with st.expander("🛠️ Результат нормализации V2 (с базой топонимов)", expanded=True):
+                        col_u1, col_u2, col_u3, col_u4 = st.columns(4)
+                        col_u1.metric("Норм. район", norm_dist or "-")
+                        col_u2.metric("Улица / Канон", f"{ua_v2.street_name} ➔ {ua_v2.canonical_name}")
+                        col_u3.metric("Дом / Дробь", f"{ua_v2.house_num or '-'}")
+                        col_u4.metric("Корпус / Стр", f"к.{ua_v2.korpus or '-'} / с.{ua_v2.structure or '-'}")
+                        st.json({
+                            "raw_input": ua_v2.raw_input,
+                            "street_name": ua_v2.street_name,
+                            "canonical_name": ua_v2.canonical_name,
+                            "core_name": ua_v2.core_name,
+                            "house_num": ua_v2.house_num,
+                            "main_house": ua_v2.main_house,
+                            "sub_house": ua_v2.sub_house,
+                            "korpus": ua_v2.korpus,
+                            "structure": ua_v2.structure,
+                            "mkr": ua_v2.mkr,
+                            "is_km_address": ua_v2.is_km_address,
+                            "km_value": ua_v2.km_value,
+                            "is_sot": ua_v2.is_sot,
+                            "sot_name": ua_v2.sot_name
+                        })
+
+                    exact_matches = []
+                    for s in schedules_data:
+                        if norm_dist not in normalize_district(s['district']):
+                            continue
+                        grps_v2 = parser_v2.split_schedule_addresses_v2(s['addresses'])
+                        res = parser_v2.match_address_detailed(ua_v2, norm_dist, s, grps_v2)
+                        if res.matched:
+                            exact_matches.append((s, res))
+
+                    st.divider()
+                    if exact_matches:
+                        st.success(f"🎯 **Найдено точных совпадений V2: {len(exact_matches)}** (Свет будет отключен)")
+                        for s, res in exact_matches:
+                            with st.container(border=True):
+                                st.markdown(f"### ⚡ [{s['district']}] {s['date']} с {s['time']}")
+                                st.markdown(f"**Причина матча:** `{res.reason}` *(уверенность: {res.confidence})*")
+                                if s['reason']:
+                                    st.markdown(f"**Причина работ:** {s['reason']}")
+                                st.markdown(f"**Все адреса в пункте:**\n> {s['addresses']}")
+                    else:
+                        st.info("ℹ️ **В текущем графике Якутскэнерго совпадений по этому адресу не найдено.**")
 
 with tab_users:
     status_filter = st.radio("Фильтр", ["Все", "Активные", "Заблокированные"], horizontal=True)
@@ -285,10 +630,15 @@ with tab_addresses:
 with tab_notif:
     st.subheader(f"Всего отправлено: {len(df_notifications)}")
 
-    notif_filter = st.text_input("Поиск по chat_id", key="notif_search")
+    notif_filter = st.text_input("Поиск по chat_id, улице или тексту работ", key="notif_search")
     filtered_notif = df_notifications.copy()
     if notif_filter:
-        filtered_notif = filtered_notif[filtered_notif['chat_id'].astype(str).str.contains(notif_filter)]
+        mask = (
+            filtered_notif['chat_id'].astype(str).str.contains(notif_filter, case=False, na=False) |
+            filtered_notif['street'].astype(str).str.contains(notif_filter, case=False, na=False) |
+            filtered_notif['message_text'].astype(str).str.contains(notif_filter, case=False, na=False)
+        )
+        filtered_notif = filtered_notif[mask]
 
     filtered_notif_display = filtered_notif.copy()
     filtered_notif_display['sent_at'] = filtered_notif_display['sent_at'].apply(lambda x: format_ru_date(x, include_time=True))
@@ -296,9 +646,26 @@ with tab_notif:
     display_notif = filtered_notif_display.rename(columns={
         'chat_id': 'Chat ID', 'address_id': 'ID адреса',
         'schedule_hash': 'Хэш', 'sent_at': 'Отправлено (ЯКТ)',
-        'district': 'Район', 'street': 'Улица'
+        'district': 'Район', 'street': 'Улица',
+        'message_text': 'Текст работ'
     })
-    st.dataframe(display_notif, width='stretch', hide_index=True)
+    st.dataframe(
+        display_notif,
+        column_config={
+            "Текст работ": st.column_config.TextColumn("Текст работ", width="large")
+        },
+        width='stretch',
+        hide_index=True
+    )
+
+    has_text_df = filtered_notif[filtered_notif['message_text'] != '']
+    if not has_text_df.empty:
+        with st.expander("🔍 Детальный просмотр текста уведомлений", expanded=False):
+            for _, r in has_text_df.head(20).iterrows():
+                dt_str = format_ru_date(r['sent_at'], include_time=True)
+                st.markdown(f"**Chat ID:** `{r['chat_id']}` | **Адрес:** {r['district']}, {r['street']} | **Отправлено:** {dt_str}")
+                st.text(r['message_text'])
+                st.divider()
 
 with tab_tickets:
     ticket_view = st.radio("Показать", ["Открытые", "Закрытые", "Все"], horizontal=True)
@@ -364,4 +731,3 @@ with tab_logs:
 st.caption(f"Данные актуальны на: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
            f"(кеш обновляется каждые 60 сек)")
 st.caption(f"https://www.yakutskenergo.ru/press/news/news-remont")
-         

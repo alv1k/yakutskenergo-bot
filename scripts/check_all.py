@@ -66,15 +66,16 @@ for chat_id, addresses in user_addresses.items():
         for m, street, aid, s_hash in all_matches:
             by_address[street].append((m, aid, s_hash))
         
-        msg = "⚠️ *Внимание! Обнаружены плановые работы:*\\n\\n"
+        msg = "⚠️ *Внимание! Обнаружены плановые работы:*\n\n"
         seen_hashes = set()
         for street, entries in by_address.items():
             for m, aid, s_hash in entries:
                 if s_hash in seen_hashes:
                     continue
                 seen_hashes.add(s_hash)
-                msg += f"📍 *Адрес:* {street}\\n📅 *Дата:* {m['date']}\\n🕒 *Время:* {m['time']}\\n🏠 *Где:* {m['addresses']}\\n🛠 *Причина:* {m['reason']}\\n\\n"
-                database.mark_as_notified(chat_id, aid, s_hash)
+                entry_text = f"📅 Дата: {m['date']}\n🕒 Время: {m['time']}\n🏠 Где: {m['addresses']}\n🛠 Причина: {m['reason']}"
+                msg += f"📍 *Адрес:* {street}\n{entry_text}\n\n"
+                database.mark_as_notified(chat_id, aid, s_hash, message_text=entry_text)
         
         bot = Bot(token=TOKEN)
         try:

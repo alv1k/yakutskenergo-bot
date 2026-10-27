@@ -31,11 +31,22 @@ _cache = {
     'ttl': 1800,  # 30 минут
 }
 
-def get_latest_maintenance_urls():
+def create_session():
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.proxies.update(PROXIES)
+    session.verify = False
+    return session
+
+def get_latest_maintenance_urls(session=None):
+    client = session or requests
     max_attempts = 3
     for attempt in range(max_attempts):
         try:
-            response = requests.get(NEWS_LIST_URL, headers=HEADERS, timeout=25, verify=False, proxies=PROXIES)
+            kwargs = {'timeout': 25}
+            if client is requests:
+                kwargs.update({'headers': HEADERS, 'verify': False, 'proxies': PROXIES})
+            response = client.get(NEWS_LIST_URL, **kwargs)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
             
@@ -55,12 +66,16 @@ def get_latest_maintenance_urls():
                 time.sleep(2 * (attempt + 1))
     return []
 
-def parse_maintenance_page(url):
+def parse_maintenance_page(url, session=None):
+    client = session or requests
     max_attempts = 3
     for attempt in range(max_attempts):
         try:
             logging.info(f"Parsing page: {url}")
-            response = requests.get(url, headers=HEADERS, timeout=25, verify=False, proxies=PROXIES)
+            kwargs = {'timeout': 25}
+            if client is requests:
+                kwargs.update({'headers': HEADERS, 'verify': False, 'proxies': PROXIES})
+            response = client.get(url, **kwargs)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
             
@@ -133,9 +148,9 @@ def parse_maintenance_page(url):
 
             return schedules
         except Exception as e:
-            logging.warning(f"Attempt {attempt+1} error parsing page {url}: {e}")
-            if attempt == 0:
-                time.sleep(2)
+            logging.warning(f"Attempt {attempt+1}/{max_attempts} error parsing page {url}: {e}")
+            if attempt < max_attempts - 1:
+                time.sleep(2 * (attempt + 1))
     return []
 
 def get_all_recent_schedules():
@@ -147,11 +162,14 @@ def get_all_recent_schedules():
         logging.info(f"Returning cached schedules ({len(_cache['data'])} entries, age={int(now - _cache['timestamp'])}s)")
         return _cache['data']
     
-    # Парсим свежие данные
-    urls = get_latest_maintenance_urls()
+    # Парсим свежие данные через постоянную HTTP-сессию
+    session = create_session()
+    urls = get_latest_maintenance_urls(session=session)
     all_schedules = []
-    for url in urls:
-        all_schedules.extend(parse_maintenance_page(url))
+    for idx, url in enumerate(urls):
+        if idx > 0 or urls:
+            time.sleep(1.5)
+        all_schedules.extend(parse_maintenance_page(url, session=session))
     
     # Сохраняем в кеш (только если успешно распарсили данные)
     if all_schedules:

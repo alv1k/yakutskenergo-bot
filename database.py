@@ -1,6 +1,7 @@
+import os
 import sqlite3
 
-DB_NAME = 'bot_database.db'
+DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot_database.db')
 MAX_ADDRESSES = 10
 
 def init_db():
@@ -29,6 +30,7 @@ def init_db():
             address_id INTEGER,
             schedule_hash TEXT,
             sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            message_text TEXT,
             PRIMARY KEY (chat_id, address_id, schedule_hash)
         )
     ''')
@@ -61,6 +63,10 @@ def init_db():
                 SELECT MIN(created_at) FROM addresses WHERE addresses.chat_id = users.chat_id
             ) WHERE created_at IS NULL
         ''')
+    cursor.execute("PRAGMA table_info(sent_notifications)")
+    sn_cols = [col[1] for col in cursor.fetchall()]
+    if 'message_text' not in sn_cols:
+        cursor.execute("ALTER TABLE sent_notifications ADD COLUMN message_text TEXT")
     conn.commit()
     conn.close()
 
@@ -209,19 +215,27 @@ def is_notified(chat_id, address_id, schedule_hash):
     conn.close()
     return res is not None
 
-def mark_as_notified(chat_id, address_id, schedule_hash, sent_at=None):
+def mark_as_notified(chat_id, address_id, schedule_hash, sent_at=None, message_text=None):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
         if sent_at:
-            cursor.execute('INSERT INTO sent_notifications (chat_id, address_id, schedule_hash, sent_at) VALUES (?, ?, ?, ?)',
-                           (chat_id, address_id, schedule_hash, sent_at))
+            cursor.execute('INSERT INTO sent_notifications (chat_id, address_id, schedule_hash, sent_at, message_text) VALUES (?, ?, ?, ?, ?)',
+                           (chat_id, address_id, schedule_hash, sent_at, message_text))
         else:
-            cursor.execute('INSERT INTO sent_notifications (chat_id, address_id, schedule_hash) VALUES (?, ?, ?)',
-                           (chat_id, address_id, schedule_hash))
+            cursor.execute('INSERT INTO sent_notifications (chat_id, address_id, schedule_hash, message_text) VALUES (?, ?, ?, ?)',
+                           (chat_id, address_id, schedule_hash, message_text))
         conn.commit()
     except sqlite3.IntegrityError:
-        pass
+        if message_text:
+            try:
+                cursor.execute(
+                    'UPDATE sent_notifications SET message_text = ? WHERE chat_id = ? AND address_id = ? AND schedule_hash = ? AND (message_text IS NULL OR message_text = "")',
+                    (message_text, chat_id, address_id, schedule_hash)
+                )
+                conn.commit()
+            except Exception:
+                pass
     conn.close()
 
 def set_blocked(chat_id):
