@@ -101,7 +101,7 @@ def load_addresses():
     df = pd.read_sql('''
         SELECT a.id, a.chat_id, a.district, a.street, a.created_at
         FROM addresses a
-        ORDER BY a.district, a.street
+        ORDER BY a.created_at DESC, a.id DESC
     ''', conn)
     conn.close()
     return df
@@ -571,20 +571,36 @@ with tab_users:
     if search_id:
         filtered = filtered[filtered['chat_id'].astype(str).str.contains(search_id)]
 
+    # Сортировка по умолчанию: от тех, кто только что зарегистрировался, до старых
+    filtered['_created_at_dt'] = pd.to_datetime(filtered['created_at'])
+    filtered = filtered.sort_values(by='_created_at_dt', ascending=False, na_position='last').drop(columns=['_created_at_dt'])
+
     filtered_display = filtered.copy()
-    filtered_display['created_at'] = filtered_display['created_at'].apply(format_ru_date)
+    filtered_display['created_at'] = filtered_display['created_at'].apply(lambda x: format_ru_date(x, include_time=True))
 
     display = filtered_display.rename(columns={
         'chat_id': 'Chat ID', 
-        'bot_blocked': 'Заблокирован',
+        'bot_blocked': 'Статус',
         'created_at': 'Зарегистрирован', 
-        'address_count': 'Адресов',
-        'notif_count': 'Уведомлений',
-        'request_count': 'Запросов'
+        'address_count': 'Адреса',
+        'notif_count': 'Уведомл.',
+        'request_count': 'Запросы'
     })
-    display['Заблокирован'] = display['Заблокирован'].map({0: 'Нет', 1: 'Да'})
+    display['Chat ID'] = display['Chat ID'].astype(str)
+    display['Статус'] = display['Статус'].map({0: 'Активен', 1: 'Блок'})
+
+    users_column_config = {
+        "Chat ID": st.column_config.TextColumn("Chat ID", width=110),
+        "Статус": st.column_config.TextColumn("Статус", width=70),
+        "Зарегистрирован": st.column_config.TextColumn("Зарегистрирован", width=190),
+        "Адреса": st.column_config.NumberColumn("Адреса", width=70),
+        "Уведомл.": st.column_config.NumberColumn("Уведомл.", width=80),
+        "Запросы": st.column_config.NumberColumn("Запросы", width=75),
+    }
+
     st.dataframe(
-        display[['Chat ID', 'Заблокирован', 'Зарегистрирован', 'Адресов', 'Уведомлений', 'Запросов']], 
+        display[['Chat ID', 'Статус', 'Зарегистрирован', 'Адреса', 'Уведомл.', 'Запросы']], 
+        column_config=users_column_config,
         width='stretch', 
         hide_index=True
     )
@@ -594,11 +610,19 @@ with tab_users:
     user_ids = st.multiselect("Выберите chat_id", options=sorted(df_users['chat_id'].tolist()))
     if user_ids:
         user_addrs = df_addresses[df_addresses['chat_id'].isin(user_ids)].copy()
-        user_addrs['created_at'] = user_addrs['created_at'].apply(format_ru_date)
+        user_addrs['_created_at_dt'] = pd.to_datetime(user_addrs['created_at'])
+        user_addrs = user_addrs.sort_values(by='_created_at_dt', ascending=False, na_position='last').drop(columns=['_created_at_dt'])
+        user_addrs['created_at'] = user_addrs['created_at'].apply(lambda x: format_ru_date(x, include_time=True))
         st.dataframe(
             user_addrs[['id', 'district', 'street', 'created_at']].rename(columns={
                 'id': 'ID', 'district': 'Район', 'street': 'Улица', 'created_at': 'Добавлен'
             }),
+            column_config={
+                "ID": st.column_config.NumberColumn("ID", width=60),
+                "Район": st.column_config.TextColumn("Район", width=120),
+                "Улица": st.column_config.TextColumn("Улица", width=250),
+                "Добавлен": st.column_config.TextColumn("Добавлен", width=190),
+            },
             width='stretch', hide_index=True
         )
 
@@ -611,14 +635,30 @@ with tab_addresses:
     if sel_district != "Все":
         filtered_addr = filtered_addr[filtered_addr['district'] == sel_district]
 
+    # Сортировка по умолчанию: от свежедобавленных к старым
+    filtered_addr['_created_at_dt'] = pd.to_datetime(filtered_addr['created_at'])
+    filtered_addr = filtered_addr.sort_values(by='_created_at_dt', ascending=False, na_position='last').drop(columns=['_created_at_dt'])
+
     filtered_addr_display = filtered_addr.copy()
-    filtered_addr_display['created_at'] = filtered_addr_display['created_at'].apply(format_ru_date)
+    filtered_addr_display['created_at'] = filtered_addr_display['created_at'].apply(lambda x: format_ru_date(x, include_time=True))
+
+    display_addr = filtered_addr_display.rename(columns={
+        'id': 'ID', 'chat_id': 'Chat ID', 'district': 'Район',
+        'street': 'Улица', 'created_at': 'Добавлен'
+    })
+    display_addr['Chat ID'] = display_addr['Chat ID'].astype(str)
+
+    addr_column_config = {
+        "ID": st.column_config.NumberColumn("ID", width=60),
+        "Chat ID": st.column_config.TextColumn("Chat ID", width=110),
+        "Район": st.column_config.TextColumn("Район", width=120),
+        "Улица": st.column_config.TextColumn("Улица", width=250),
+        "Добавлен": st.column_config.TextColumn("Добавлен", width=190),
+    }
 
     st.dataframe(
-        filtered_addr_display[['id', 'chat_id', 'district', 'street', 'created_at']].rename(columns={
-            'id': 'ID', 'chat_id': 'Chat ID', 'district': 'Район',
-            'street': 'Улица', 'created_at': 'Добавлен'
-        }),
+        display_addr[['ID', 'Chat ID', 'Район', 'Улица', 'Добавлен']],
+        column_config=addr_column_config,
         width='stretch', hide_index=True
     )
 

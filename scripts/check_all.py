@@ -66,31 +66,63 @@ for chat_id, addresses in user_addresses.items():
         for m, street, aid, s_hash in all_matches:
             by_address[street].append((m, aid, s_hash))
         
-        msg = "⚠️ *Внимание! Обнаружены плановые работы:*\n\n"
         seen_hashes = set()
+        unique_entries = []
         for street, entries in by_address.items():
             for m, aid, s_hash in entries:
-                if s_hash in seen_hashes:
+                if (aid, s_hash) in seen_hashes:
                     continue
-                seen_hashes.add(s_hash)
-                entry_text = f"📅 Дата: {m['date']}\n🕒 Время: {m['time']}\n🏠 Где: {m['addresses']}\n🛠 Причина: {m['reason']}"
-                msg += f"📍 *Адрес:* {street}\n{entry_text}\n\n"
-                database.mark_as_notified(chat_id, aid, s_hash, message_text=entry_text)
+                seen_hashes.add((aid, s_hash))
+                unique_entries.append((street, m, aid, s_hash))
+
+        chunks = []
+        current_text = "⚠️ *Внимание! Обнаружены плановые работы:*\n\n"
+        current_items = []
+
+        for street, m, aid, s_hash in unique_entries:
+            entry_text = f"📅 Дата: {m['date']}\n🕒 Время: {m['time']}\n🛠 Причина: {m['reason']}"
+            block = f"📍 *Адрес:* {street}\n{entry_text}\n\n"
+
+            if len(current_text) + len(block) > 3600:
+                if current_items:
+                    chunks.append((current_text, current_items))
+                current_text = "⚠️ *Продолжение списка плановых работ:*\n\n" + block
+                current_items = [(aid, s_hash, entry_text)]
+            else:
+                current_text += block
+                current_items.append((aid, s_hash, entry_text))
+
+        if current_items:
+            chunks.append((current_text, current_items))
         
         bot = Bot(token=TOKEN)
-        try:
-            asyncio.get_event_loop().run_until_complete(
-                bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
-            )
-            print(f"  chat_id={chat_id} -> OK ({len(by_address)} адр, {len(seen_hashes)} записей)")
+        sent_any = False
+        loop = asyncio.get_event_loop()
+
+        for chunk_text, items in chunks:
+            try:
+                try:
+                    loop.run_until_complete(bot.send_message(chat_id=chat_id, text=chunk_text, parse_mode='Markdown'))
+                except Exception as me:
+                    if "can't parse entities" in str(me).lower() or "markdown" in str(me).lower():
+                        clean_text = chunk_text.replace('*', '').replace('_', '').replace('`', '')
+                        loop.run_until_complete(bot.send_message(chat_id=chat_id, text=clean_text))
+                    else:
+                        raise me
+                sent_any = True
+                for aid, s_hash, entry_text in items:
+                    database.mark_as_notified(chat_id, aid, s_hash, message_text=entry_text)
+            except Exception as e:
+                err = str(e).lower()
+                if "blocked" in err or "deactivated" in err:
+                    database.set_blocked(chat_id)
+                    print(f"  chat_id={chat_id} -> BLOCKED")
+                else:
+                    print(f"  chat_id={chat_id} -> ERROR: {e}")
+
+        if sent_any:
+            print(f"  chat_id={chat_id} -> OK ({len(by_address)} адр, {len(unique_entries)} записей)")
             total_sent += 1
-        except Exception as e:
-            err = str(e).lower()
-            if "blocked" in err or "deactivated" in err:
-                database.set_blocked(chat_id)
-                print(f"  chat_id={chat_id} -> BLOCKED")
-            else:
-                print(f"  chat_id={chat_id} -> ERROR: {e}")
     # else:
     #     print(f"  chat_id={chat_id} -> нет совпадений")
 

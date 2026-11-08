@@ -37,3 +37,4 @@ Thumbs.db
 *.bak*
 *.tmp
 .socraticodeignore
+data/schedules_cache.json

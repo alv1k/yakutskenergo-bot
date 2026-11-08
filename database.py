@@ -253,6 +253,23 @@ def is_blocked(chat_id):
     conn.close()
     return res is not None and res[0] == 1
 
+def cleanup_old_notifications(days=60):
+    """Удаляет устаревшие записи истории уведомлений старше `days` дней."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "DELETE FROM sent_notifications WHERE sent_at < datetime('now', ?)",
+            (f"-{days} days",)
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        return deleted
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
 if __name__ == "__main__":
     init_db()
     migrate_from_old_schema()

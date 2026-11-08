@@ -57,7 +57,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• *➕ Добавить адрес* — укажите улицу и дом (г. Якутск или районы РС(Я))\n"
         "• *🔍 Проверить сейчас* — мгновенная проверка графика по вашим адресам\n"
         "• *📋 Мои адреса* / *➖ Удалить адрес* — управление списком\n"
-        "• *⏰ Авто-уведомления* приходят в 10:00 и 22:00 (YKT)\n\n"
+        "• *⏰ Уведомления* — бот регулярно проверяет сайт и заранее предупредит вас (ровно один раз) при публикации графика\n\n"
         "Для добавления нажмите кнопку ниже 👇",
         reply_markup=get_main_keyboard(),
         parse_mode='Markdown'
@@ -115,7 +115,7 @@ async def confirm_yakutsk(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Адрес добавлен!\n"
                 f"Район: {district}\n"
                 f"Улица: {street}\n\n"
-                "Уведомления придут в 10:00 или 22:00 по Якутску."
+                "Бот заранее уведомит вас при появлении плановых отключений по этому адресу."
             )
         return ConversationHandler.END
     else:
@@ -146,7 +146,7 @@ async def process_district_after(update: Update, context: ContextTypes.DEFAULT_T
             f"✅ Адрес добавлен!\n"
             f"Район: {district}\n"
             f"Улица: {street}\n\n"
-            "Уведомления придут в 10:00 или 22:00 по Якутску.",
+            "Бот заранее уведомит вас при появлении плановых отключений по этому адресу.",
             reply_markup=get_main_keyboard()
         )
     return ConversationHandler.END
@@ -580,6 +580,7 @@ def split_schedule_addresses_v1(addr_string):
         houses_part = re.sub(r'\b\d+\s*(?:-\s*\d+)?\s*км\b', '', houses).strip()
         houses_part = re.sub(r'\b(пр-д|б-р|ул|пер|пр|ш|наб|пл|туп|тр|мкр|корп|снт|сот|днт|гсп|км)\b', '', houses_part).strip()
         groups.append({
+            'raw_text': part.strip(),
             'street_norm': street_part,
             'km_value': km_value,
             'km_from': km_from,
@@ -714,13 +715,69 @@ def match_address_against_schedule(ua, norm_user_district, s, addr_groups):
     return matched
 
 
-async def check_updates(application, target_chat_id=None, force_date=None, is_manual=False):
+def get_matched_address_snippet(ua, norm_user_district, s, addr_groups):
+    """
+    Возвращает компактную строку только с теми адресами/домами из графика,
+    которые непосредственно относятся к пользователю (отсекая посторонние улицы).
+    """
+    matched_snippets = []
+
+    # Режим V2 (основной)
+    if ADDRESS_PARSER_MODE != "v1":
+        groups_v2 = addr_groups if (addr_groups and isinstance(addr_groups[0], parser_v2.ScheduleAddressGroup)) else parser_v2.split_schedule_addresses_v2(s.get('addresses', ''))
+        dummy = {'district': s.get('district', ''), 'addresses': s.get('addresses', '')}
+        for grp in groups_v2:
+            res = parser_v2.match_address_detailed(ua, norm_user_district, dummy, [grp])
+            if res.matched:
+                snippet = getattr(grp, 'raw_text', '') or grp.full_norm or grp.street_norm
+                if snippet and snippet not in matched_snippets:
+                    matched_snippets.append(snippet.strip().rstrip('.,;'))
+        if matched_snippets:
+            return ", ".join(matched_snippets)
+        if not match_address_against_schedule(ua, norm_user_district, s, addr_groups):
+            return None
+
+    # Режим V1
+    if match_address_against_schedule(ua, norm_user_district, s, addr_groups):
+        if ua.get('core_name'):
+            st_pat = build_street_pattern(ua['core_name'])
+            for grp in addr_groups:
+                if isinstance(grp, dict) and st_pat.search(grp.get('street_norm', '')):
+                    snippet = grp.get('raw_text') or grp.get('full_norm') or grp.get('street_norm')
+                    if snippet and snippet not in matched_snippets:
+                        matched_snippets.append(snippet.strip().rstrip('.,;'))
+        if matched_snippets:
+            return ", ".join(matched_snippets)
+        return s.get('addresses', '')[:150]
+
+    return None
+
+
+async def safe_send_message(bot, chat_id, text, parse_mode='Markdown'):
+    """Отправляет сообщение с безопасным фоллбэком на plain-text при ошибке разметки Telegram."""
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+    except Exception as e:
+        err = str(e).lower()
+        if "can't parse entities" in err or "entity" in err or "markdown" in err:
+            clean_text = text.replace('*', '').replace('_', '').replace('`', '')
+            return await bot.send_message(chat_id=chat_id, text=clean_text)
+        raise
+
+
+async def check_updates(application, target_chat_id=None, force_date=None, is_manual=False, schedules=None):
     logging.info(f"Checking updates (force_date={force_date}, is_manual={is_manual})...")
-    schedules = await asyncio.to_thread(scraper.get_all_recent_schedules)
+    if schedules is None:
+        schedules = await asyncio.to_thread(scraper.get_all_recent_schedules)
 
     ykt_tz = timezone(timedelta(hours=9))
     now_ykt = datetime.now(ykt_tz)
     today = now_ykt.date()
+
+    # Для фоновых проверок (не ручной запрос): если force_date не задан явно,
+    # вычисляем целевую дату: утром — сегодня, вечером — завтра
+    if not is_manual and force_date is None:
+        force_date = get_scheduled_check_date(now_ykt)
 
     if target_chat_id:
         all_addresses = [(target_chat_id, aid, dist, street) for aid, dist, street in database.get_user_addresses(target_chat_id)]
@@ -751,17 +808,46 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
     if force_date:
         date_str = force_date.strftime("%d.%m.%Y")
     elif matched_dates:
-        date_str = ", ".join(d.strftime("%d.%m.%Y") for d in sorted(matched_dates))
+        sorted_dates = sorted(matched_dates)
+        if len(sorted_dates) > 3:
+            date_str = f"с {sorted_dates[0].strftime('%d.%m.%Y')} по {sorted_dates[-1].strftime('%d.%m.%Y')} ({len(sorted_dates)} дат)"
+        else:
+            date_str = ", ".join(d.strftime("%d.%m.%Y") for d in sorted_dates)
     else:
         date_str = today.strftime("%d.%m.%Y")
 
     total_matches_count = 0
     users_notified_count = 0
     user_matches_count = 0
+    site_down = not scraper.is_site_online()
+
+    if target_chat_id and not schedules:
+        if site_down:
+            msg = (
+                "⚠️ *Официальный сайт ПАО «Якутскэнерго» (yakutskenergo.ru) сейчас недоступен.*\n\n"
+                "Сервер энергокомпании не отвечает на запросы (технические неполадки на стороне Якутскэнерго). "
+                "К сожалению, получить свежие графики отключений на данный момент невозможно.\n\n"
+                "Пожалуйста, повторите попытку позже."
+            )
+        else:
+            msg = "ℹ️ В настоящее время опубликованных графиков плановых работ не найдено."
+        try:
+            await safe_send_message(application.bot, chat_id=target_chat_id, text=msg, parse_mode='Markdown')
+        except Exception as e:
+            logging.error(f"Error sending no schedules message to {target_chat_id}: {e}")
+        return {
+            "date_str": date_str,
+            "total_schedules": 0,
+            "target_date_schedules": 0,
+            "total_matches": 0,
+            "users_notified": 0,
+            "user_matches_found": 0,
+        }
 
     if target_chat_id and not user_addresses:
         try:
-            await application.bot.send_message(
+            await safe_send_message(
+                application.bot,
                 chat_id=target_chat_id,
                 text="У вас пока нет сохранённых адресов. Нажмите «➕ Добавить адрес»."
             )
@@ -801,60 +887,103 @@ async def check_updates(application, target_chat_id=None, force_date=None, is_ma
                     logging.error(f"Failed to parse address '{street}' (chat_id={chat_id}): {e}")
                     continue
                 norm_user_district = normalize_district(district)
-                if match_address_against_schedule(ua, norm_user_district, s, addr_groups):
+                matched_snippet = get_matched_address_snippet(ua, norm_user_district, s, addr_groups)
+                if matched_snippet:
                     s_hash = hashlib.md5(f"{s['date']}{s['time']}{s['addresses']}{s['reason']}".encode()).hexdigest()
                     if is_manual:
-                        all_matches.append((s, street, aid, None))
+                        all_matches.append((s, street, aid, s_hash, matched_snippet))
                     elif not database.is_notified(chat_id, aid, s_hash):
-                        all_matches.append((s, street, aid, s_hash))
+                        all_matches.append((s, street, aid, s_hash, matched_snippet))
 
         if all_matches:
             total_matches_count += len(all_matches)
             if target_chat_id:
                 user_matches_count = len(all_matches)
 
-            # Группируем записи по адресу
+            # Группируем записи по адресу и дедуплицируем
             from collections import defaultdict
             by_address = defaultdict(list)
-            for m, street, aid, s_hash in all_matches:
-                by_address[street].append((m, aid, s_hash))
+            for m, street, aid, s_hash, matched_snippet in all_matches:
+                by_address[street].append((m, aid, s_hash, matched_snippet))
 
-            msg = f"⚠️ *Внимание! Обнаружены плановые работы:*\n📅 *Проверены списки за:* {date_str}\n\n"
             seen_hashes = set()
+            unique_entries = []
             for street, entries in by_address.items():
-                for m, aid, s_hash in entries:
-                    if s_hash and (aid, s_hash) in seen_hashes:
+                for m, aid, s_hash, matched_snippet in entries:
+                    if (aid, s_hash) in seen_hashes:
                         continue
-                    if s_hash:
-                        seen_hashes.add((aid, s_hash))
-                    entry_text = f"📅 Дата: {m['date']}\n🕒 Время: {m['time']}\n🏠 Где: {m['addresses']}\n🛠 Причина: {m['reason']}"
-                    msg += f"📍 *Адрес:* {street}\n{entry_text}\n\n"
-                    if s_hash:
-                        database.mark_as_notified(chat_id, aid, s_hash, message_text=entry_text)
+                    seen_hashes.add((aid, s_hash))
+                    unique_entries.append((street, m, aid, s_hash, matched_snippet))
 
-            try:
-                await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+            # Сортируем записи хронологически: по дате, времени и названию улицы
+            def _entry_sort_key(item):
+                st, m, _, _, _ = item
+                parsed_dt = parse_russian_date(m.get('date', ''), ref_date=now_ykt) or date.max
+                time_str = m.get('time', '')
+                return (parsed_dt, time_str, st)
+
+            unique_entries.sort(key=_entry_sort_key)
+
+            # Формируем безопасные чанки до 3600 символов (лимит Telegram 4096)
+            chunks = []
+            site_banner = "⚠️ *Официальный сайт «Якутскэнерго» временно недоступен.*\nℹ️ _Списки проверены по последней сохранённой копии графиков._\n\n" if site_down else ""
+            current_header = f"{site_banner}⚠️ *Внимание! Обнаружены плановые работы:*\n📅 *Проверены списки за:* {date_str}\n\n"
+            current_text = current_header
+            current_items = []
+
+            for street, m, aid, s_hash, matched_snippet in unique_entries:
+                entry_text = f"📅 Дата: {m['date']}\n🕒 Время: {m['time']}\n🛠 Причина: {m['reason']}"
+                block = f"📍 *Адрес:* {street}\n{entry_text}\n\n"
+
+                if len(current_text) + len(block) > 3600:
+                    if current_items:
+                        chunks.append((current_text, current_items))
+                    current_text = f"⚠️ *Продолжение списка плановых работ:*\n\n" + block
+                    current_items = [(aid, s_hash, entry_text)]
+                else:
+                    current_text += block
+                    current_items.append((aid, s_hash, entry_text))
+
+            if current_items:
+                chunks.append((current_text, current_items))
+
+            sent_any = False
+            for chunk_text, items in chunks:
+                try:
+                    await safe_send_message(application.bot, chat_id=chat_id, text=chunk_text, parse_mode='Markdown')
+                    sent_any = True
+                    if not is_manual:
+                        for aid, s_hash, entry_text in items:
+                            database.mark_as_notified(chat_id, aid, s_hash, message_text=entry_text)
+                except Exception as e:
+                    err = str(e).lower()
+                    if "blocked" in err or "deactivated" in err:
+                        try:
+                            database.set_blocked(chat_id)
+                        except Exception:
+                            pass
+                    logging.error(f"Error sending message chunk to {chat_id}: {e}")
+
+            if sent_any:
                 users_notified_count += 1
-            except Exception as e:
-                err = str(e).lower()
-                if "blocked" in err or "deactivated" in err:
-                    try:
-                        database.set_blocked(chat_id)
-                    except Exception:
-                        pass
-                logging.error(f"Error sending message to {chat_id}: {e}")
 
-            matched_aids = {aid for _, _, aid, _ in all_matches}
+            matched_aids = {aid for _, _, aid, _, _ in all_matches}
             if is_manual:
                 for aid, district, street in addresses:
                     database.log_request(chat_id, f"Улица: {street}", aid in matched_aids)
         elif target_chat_id:
+            site_notice = (
+                "\n\n⚠️ _Обратите внимание: официальный сайт «Якутскэнерго» (yakutskenergo.ru) сейчас недоступен. "
+                "Проверка проведена по сохранённой копии графиков._"
+                if site_down else ""
+            )
             try:
-                await application.bot.send_message(
+                await safe_send_message(
+                    application.bot,
                     chat_id=chat_id,
                     text=f"✅ *Проверка проведена без ошибок.*\n\n"
                          f"📅 Проверены списки за: *{date_str}*\n"
-                         f"🔍 Совпадений по вашим адресам не найдено.",
+                         f"🔍 Совпадений по вашим адресам не найдено.{site_notice}",
                     parse_mode='Markdown'
                 )
             except Exception as e:
@@ -903,7 +1032,7 @@ async def notify_admin_check_result(application, check_date, stats):
             f"📋 Записей в графике на дату: *{target_schedules}* (всего спарсено: {total_schedules})\n"
             f"🔍 Совпадений по адресам: {matches_text}"
         )
-        await application.bot.send_message(chat_id=admin_id, text=text, parse_mode='Markdown')
+        await safe_send_message(application.bot, chat_id=admin_id, text=text, parse_mode='Markdown')
     except Exception as e:
         logging.error(f"Failed to send admin check notification: {e}")
 
@@ -919,7 +1048,7 @@ async def notify_admin_check_error(application, check_date, error_exc):
             f"📅 Проверялась дата: *{date_str}*\n"
             f"⚠️ Ошибка: `{str(error_exc)[:300]}`"
         )
-        await application.bot.send_message(chat_id=admin_id, text=text, parse_mode='Markdown')
+        await safe_send_message(application.bot, chat_id=admin_id, text=text, parse_mode='Markdown')
     except Exception as e:
         logging.error(f"Failed to send admin error notification: {e}")
 
@@ -929,64 +1058,140 @@ async def global_error_handler(update, context):
     logging.error(f"Global telegram update error: {context.error}", exc_info=context.error)
 
 
+# Расписание Smart Polling (часы и минуты по времени Якутска, UTC+9):
+# 07:00 - 11:00: каждые 30 минут (утреннее окно перед началом работ)
+# 11:00 - 15:00: тихий час без проверок (пауза до 15:00)
+# 15:00 - 21:00: каждый час (вечернее окно публикаций графиков на завтра)
+# 21:00 - 07:00: ночной режим без проверок (пауза до 07:00 следующего дня)
+SCHEDULE_SLOTS = [
+    (7, 0), (7, 30),
+    (8, 0), (8, 30),
+    (9, 0), (9, 30),
+    (10, 0), (10, 30),
+    (11, 0),
+    # 11:00 - 15:00: пауза (тихий час)
+    (15, 0),
+    (16, 0),
+    (17, 0),
+    (18, 0),
+    (19, 0),
+    (20, 0),
+    (21, 0),
+    # 21:00 - 07:00: ночная пауза
+]
+
+
+def get_next_schedule_time(now_ykt: datetime) -> datetime:
+    """Вычисляет точное время следующего слота Smart Polling по времени Якутска."""
+    today = now_ykt.date()
+    for h, m in SCHEDULE_SLOTS:
+        slot_dt = now_ykt.replace(hour=h, minute=m, second=0, microsecond=0)
+        if slot_dt > now_ykt + timedelta(seconds=2):
+            return slot_dt
+    tomorrow = today + timedelta(days=1)
+    first_h, first_m = SCHEDULE_SLOTS[0]
+    return now_ykt.replace(
+        year=tomorrow.year, month=tomorrow.month, day=tomorrow.day,
+        hour=first_h, minute=first_m, second=0, microsecond=0
+    )
+
+
+def is_in_active_window(now_ykt: datetime) -> bool:
+    """Проверяет, попадает ли текущее время в активные окна проверок."""
+    t = now_ykt.time()
+    t_0700 = time(7, 0)
+    t_1100 = time(11, 0)
+    t_1500 = time(15, 0)
+    t_2100 = time(21, 0)
+    return (t_0700 <= t <= t_1100) or (t_1500 <= t <= t_2100)
+
+
+def get_scheduled_check_date(now_ykt: datetime) -> date:
+    """Определяет целевую дату для фоновой проверки по времени Якутска (UTC+9):
+    - Утром (до 13:00 YKT, слоты 07:00-11:00): только текущий день (сегодня).
+    - Днём и вечером (с 13:00 YKT, слоты 15:00-21:00): завтрашний день (завтра).
+    """
+    if now_ykt.hour < 13:
+        return now_ykt.date()
+    return now_ykt.date() + timedelta(days=1)
+
+
 scheduler_job = None
 
 async def scheduler_task(application):
     ykt_tz = timezone(timedelta(hours=9))
+    logging.info("Starting Smart Polling scheduler (07:00-11:00 /30m, 11:00-15:00 pause, 15:00-21:00 /1h)...")
+
+    # Первичная проверка при старте бота, если бот запущен в активное рабочее окно
+    now_ykt = datetime.now(ykt_tz)
+    if is_in_active_window(now_ykt):
+        target_date = get_scheduled_check_date(now_ykt)
+        logging.info(f"Startup within active window: checking news feed for target_date={target_date}...")
+        try:
+            has_new, fresh_schedules = await asyncio.to_thread(scraper.check_for_new_schedules)
+            schedules_to_check = fresh_schedules or scraper.get_all_recent_schedules()
+            if schedules_to_check:
+                logging.info(f"Startup check: running matcher for {target_date} ({len(schedules_to_check)} items in cache/fresh)...")
+                stats = await check_updates(application, force_date=target_date, schedules=schedules_to_check)
+                if stats and stats.get("users_notified", 0) > 0:
+                    await notify_admin_check_result(application, stats.get("date_str", str(target_date)), stats)
+            else:
+                logging.info("Startup check: no schedules found in cache or on site.")
+        except Exception as e:
+            logging.error(f"Initial scheduler check failed: {e}", exc_info=True)
+            await notify_admin_check_error(application, target_date, e)
+
     try:
         while True:
             now_ykt = datetime.now(ykt_tz)
-            today = now_ykt.date()
-            tomorrow = today + timedelta(days=1)
+            next_run = get_next_schedule_time(now_ykt)
+            wait_seconds = max((next_run - now_ykt).total_seconds(), 5.0)
 
-            # Define target times in YKT
-            t10 = now_ykt.replace(hour=10, minute=0, second=0, microsecond=0)
-            t22 = now_ykt.replace(hour=22, minute=0, second=0, microsecond=0)
-
-            # Проверяем на сегодня, если 10:00 ещё не прошло
-            if now_ykt < t10:
-                wait_seconds = (t10 - now_ykt).total_seconds()
-                logging.info(f"Next run at {t10} (YKT), checking today. Waiting {wait_seconds}s")
-                await asyncio.sleep(wait_seconds)
-                try:
-                    stats = await check_updates(application, force_date=today)
-                    await notify_admin_check_result(application, today, stats)
-                except Exception as e:
-                    logging.error(f"Scheduler check (today) failed: {e}", exc_info=True)
-                    await notify_admin_check_error(application, today, e)
-
-            # Проверяем на завтра в 10:00 (если 10:00 уже прошло сегодня)
-            # или в 22:00 (если между 10:00 и 22:00)
-            if now_ykt < t22:
-                wait_seconds = (t22 - now_ykt).total_seconds()
-                logging.info(f"Next run at {t22} (YKT), checking tomorrow. Waiting {wait_seconds}s")
-                await asyncio.sleep(wait_seconds)
-                try:
-                    stats = await check_updates(application, force_date=tomorrow)
-                    await notify_admin_check_result(application, tomorrow, stats)
-                except Exception as e:
-                    logging.error(f"Scheduler check (tomorrow evening) failed: {e}", exc_info=True)
-                    await notify_admin_check_error(application, tomorrow, e)
-
-            # Если оба времени прошли, ждём до завтра 10:00
-            next_t10 = t10 + timedelta(days=1)
-            wait_seconds = (next_t10 - datetime.now(ykt_tz)).total_seconds()
-            logging.info(f"Next run at {next_t10} (YKT), checking tomorrow. Waiting {wait_seconds}s")
+            logging.info(
+                f"Smart Polling: next check scheduled at {next_run.strftime('%Y-%m-%d %H:%M')} YKT "
+                f"(wait {int(wait_seconds)}s / {wait_seconds / 60:.1f}m)"
+            )
             await asyncio.sleep(wait_seconds)
-            try:
-                stats = await check_updates(application, force_date=tomorrow)
-                await notify_admin_check_result(application, tomorrow, stats)
-            except Exception as e:
-                logging.error(f"Scheduler check (next morning) failed: {e}", exc_info=True)
-                await notify_admin_check_error(application, tomorrow, e)
 
-            # Small sleep to prevent immediate re-triggering
-            await asyncio.sleep(60)
+            check_time_ykt = datetime.now(ykt_tz)
+            target_date = get_scheduled_check_date(check_time_ykt)
+            logging.info(f"Smart Polling check starting at {check_time_ykt.strftime('%H:%M:%S')} YKT for target_date={target_date}...")
+            try:
+                # 1. Быстрый опрос страницы новостей: есть ли новая публикация?
+                has_new, fresh_schedules = await asyncio.to_thread(scraper.check_for_new_schedules)
+                schedules_to_check = fresh_schedules or scraper.get_all_recent_schedules()
+
+                # 2. Запускаем сверку по адресам на целевую дату (утро: сегодня, вечер: завтра)
+                stats = await check_updates(application, force_date=target_date, schedules=schedules_to_check)
+                users_notified = stats.get("users_notified", 0) if stats else 0
+                total_matches = stats.get("total_matches", 0) if stats else 0
+
+                logging.info(
+                    f"Smart Polling check finished for {target_date}: matches={total_matches}, users_notified={users_notified}, has_new={has_new}"
+                )
+
+                # Уведомляем админа только если были реально отправлены уведомления пользователям
+                if users_notified > 0:
+                    check_date_label = stats.get("date_str") or target_date.strftime("%d.%m.%Y")
+                    await notify_admin_check_result(application, check_date_label, stats)
+            except Exception as e:
+                logging.error(f"Smart Polling check failed: {e}", exc_info=True)
+                await notify_admin_check_error(application, target_date, e)
+
+            # Небольшая пауза для гарантированного перехода границы секунды
+            await asyncio.sleep(5)
     except asyncio.CancelledError:
         logging.info("Scheduler task cancelled cleanly for shutdown.")
         raise
 
 async def post_init(application):
+    try:
+        deleted = database.cleanup_old_notifications(days=60)
+        if deleted > 0:
+            logging.info(f"Cleaned up {deleted} old sent notifications (older than 60 days).")
+    except Exception as e:
+        logging.warning(f"Could not cleanup old notifications: {e}")
+
     global scheduler_job
     scheduler_job = asyncio.create_task(scheduler_task(application))
     await application.bot.set_my_commands([

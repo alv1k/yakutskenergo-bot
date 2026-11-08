@@ -5,6 +5,9 @@ import logging
 import urllib3
 import time
 import html
+import os
+import json
+from datetime import datetime, timedelta
 
 # Suppress insecure request warnings if we disable SSL verify
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -29,7 +32,84 @@ _cache = {
     'data': None,
     'timestamp': 0,
     'ttl': 1800,  # 30 минут
+    'site_online': False,
+    'last_successful_fetch': 0,
+    'urls': [],
 }
+
+def is_site_online():
+    """Возвращает True, если официальный сайт доступен и отдает данные."""
+    return _cache.get('site_online', False)
+
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+CACHE_FILE = os.path.join(CACHE_DIR, "schedules_cache.json")
+
+def load_disk_cache():
+    """Загружает расписания и сохраненные URL из локального дискового кеша."""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                    return data["data"], data.get("timestamp", 0), data.get("urls", [])
+                elif isinstance(data, list):
+                    mtime = os.path.getmtime(CACHE_FILE)
+                    return data, mtime, []
+        except Exception as e:
+            logging.error(f"Error reading schedules disk cache from {CACHE_FILE}: {e}")
+    return None, 0, []
+
+_MONTHS = {
+    'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4, 'мая': 5, 'июня': 6,
+    'июля': 7, 'августа': 8, 'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12
+}
+
+def _parse_entry_date(date_str, ref_date=None):
+    if not date_str:
+        return None
+    ref = ref_date or datetime.now()
+    try:
+        m = re.search(r'(\d+)\s*([а-яА-Я]+)', date_str)
+        if not m:
+            return None
+        day = int(m.group(1))
+        month = _MONTHS.get(m.group(2).lower())
+        if not month:
+            return None
+        year = ref.year + 1 if ref.month == 12 and month == 1 else ref.year
+        return datetime(year, month, day).date()
+    except Exception:
+        return None
+
+def save_disk_cache(schedules, timestamp, urls=None):
+    """Атомарно сохраняет расписания и список обработанных URL в локальный дисковый кеш."""
+    if not schedules:
+        return
+    try:
+        # Автоматическая очистка записей, прошедших более 2 дней назад
+        cutoff_date = datetime.now().date() - timedelta(days=2)
+        fresh_schedules = []
+        for s in schedules:
+            d = _parse_entry_date(s.get('date'))
+            if d is None or d >= cutoff_date:
+                fresh_schedules.append(s)
+        schedules = fresh_schedules
+
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        temp_file = f"{CACHE_FILE}.tmp.{os.getpid()}"
+        payload = {
+            "timestamp": timestamp,
+            "updated_at": datetime.now().isoformat(),
+            "count": len(schedules),
+            "urls": urls or [],
+            "data": schedules
+        }
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(temp_file, CACHE_FILE)
+        logging.info(f"Saved {len(schedules)} schedules to disk cache: {CACHE_FILE}")
+    except Exception as e:
+        logging.error(f"Failed to write schedules disk cache: {e}")
 
 def create_session():
     session = requests.Session()
@@ -153,36 +233,95 @@ def parse_maintenance_page(url, session=None):
                 time.sleep(2 * (attempt + 1))
     return []
 
+def check_for_new_schedules(force_parse=False):
+    """
+    Легкий опрос ленты новостей Якутскэнерго:
+    1. Делает ровно 1 запрос к странице новостей со списком ссылок.
+    2. Сравнивает последние URL новостей с уже обработанными в кеше.
+    3. Если новых ссылок нет — возвращает (False, cached_schedules).
+    4. Если есть хотя бы одна новая публикация — парсит ее, обновляет кеш и возвращает (True, fresh_schedules).
+    """
+    global _cache
+    now = time.time()
+
+    # Инициализация кеша из диска при необходимости
+    if _cache['data'] is None:
+        disk_data, disk_ts, disk_urls = load_disk_cache()
+        if disk_data is not None:
+            _cache['data'] = disk_data
+            _cache['timestamp'] = disk_ts
+            _cache['urls'] = disk_urls
+
+    try:
+        session = create_session()
+        fresh_urls = get_latest_maintenance_urls(session=session)
+    except Exception as e:
+        logging.error(f"Error checking latest maintenance urls: {e}")
+        fresh_urls = []
+
+    if not fresh_urls:
+        _cache['site_online'] = False
+        logging.warning("Check news feed: failed to fetch news list from site.")
+        return False, (_cache['data'] or [])
+
+    _cache['site_online'] = True
+    cached_urls = _cache.get('urls') or []
+
+    # Проверяем, появились ли новые ссылки
+    has_new_urls = any(u not in cached_urls for u in fresh_urls) if cached_urls else True
+
+    if not force_parse and not has_new_urls and _cache['data']:
+        logging.info(f"Check news feed: no new news URLs detected ({len(fresh_urls)} URLs unchanged). Matcher skipped.")
+        return False, _cache['data']
+
+    logging.info(f"Check news feed: new news detected (fresh={fresh_urls}, cached={cached_urls})! Parsing pages...")
+    all_schedules = []
+    try:
+        for idx, url in enumerate(fresh_urls):
+            if idx > 0:
+                time.sleep(1.5)
+            all_schedules.extend(parse_maintenance_page(url, session=session))
+    except Exception as e:
+        logging.error(f"Error while parsing maintenance pages: {e}")
+
+    if all_schedules:
+        _cache['data'] = all_schedules
+        _cache['timestamp'] = now
+        _cache['site_online'] = True
+        _cache['last_successful_fetch'] = now
+        _cache['urls'] = fresh_urls
+        save_disk_cache(all_schedules, now, urls=fresh_urls)
+        logging.info(f"Parsed and cached {len(all_schedules)} schedules from {len(fresh_urls)} news pages.")
+        return True, all_schedules
+    elif _cache['data']:
+        logging.warning("Parsing fresh pages returned 0 items, keeping previous cache.")
+        return False, _cache['data']
+
+    return False, []
+
 def get_all_recent_schedules():
     global _cache
     now = time.time()
     
-    # Проверяем кеш
+    # 1. Проверяем in-memory кеш
     if _cache['data'] is not None and (now - _cache['timestamp']) < _cache['ttl']:
         logging.info(f"Returning cached schedules ({len(_cache['data'])} entries, age={int(now - _cache['timestamp'])}s)")
         return _cache['data']
     
-    # Парсим свежие данные через постоянную HTTP-сессию
-    session = create_session()
-    urls = get_latest_maintenance_urls(session=session)
-    all_schedules = []
-    for idx, url in enumerate(urls):
-        if idx > 0 or urls:
-            time.sleep(1.5)
-        all_schedules.extend(parse_maintenance_page(url, session=session))
-    
-    # Сохраняем в кеш (только если успешно распарсили данные)
-    if all_schedules:
-        _cache['data'] = all_schedules
-        _cache['timestamp'] = now
-        logging.info(f"Fresh schedules parsed: {len(all_schedules)} entries")
-    elif _cache['data'] is not None:
-        logging.warning(f"Failed to fetch fresh schedules, falling back to previous cache ({len(_cache['data'])} entries)")
-        return _cache['data']
-    else:
-        logging.warning("No schedules parsed and no cache available")
-    
-    return all_schedules
+    # 2. Если в памяти пусто, подтягиваем с диска
+    if _cache['data'] is None:
+        disk_data, disk_ts, disk_urls = load_disk_cache()
+        if disk_data is not None:
+            _cache['data'] = disk_data
+            _cache['timestamp'] = disk_ts
+            _cache['urls'] = disk_urls
+            logging.info(f"Loaded {len(disk_data)} schedules from disk cache (age={int(now - disk_ts)}s)")
+            if (now - disk_ts) < _cache['ttl']:
+                return disk_data
+
+    # 3. Запускаем проверку ленты новостей
+    has_new, schedules = check_for_new_schedules()
+    return schedules or _cache.get('data') or []
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

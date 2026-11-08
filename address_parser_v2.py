@@ -206,6 +206,7 @@ class ScheduleAddressGroup:
     full_norm: str
     houses_raw: str
     houses_part: str
+    raw_text: str = ""
     is_km: bool = False
     km_value: Optional[int] = None
     km_from: Optional[int] = None
@@ -222,6 +223,7 @@ class ScheduleAddressGroup:
     def to_legacy_dict(self) -> Dict[str, Any]:
         """Возвращает совместимый словарь для кода V1."""
         return {
+            'raw_text': self.raw_text,
             'street_norm': self.street_norm,
             'km_value': self.km_value,
             'km_from': self.km_from,
@@ -585,6 +587,7 @@ def split_schedule_addresses_v2(addr_string: str) -> List[ScheduleAddressGroup]:
             full_norm=part_norm,
             houses_raw=houses_part,
             houses_part=houses_part,
+            raw_text=part.strip(),
             is_km=is_km,
             km_value=km_val,
             km_from=km_from,

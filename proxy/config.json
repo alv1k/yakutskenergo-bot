@@ -27,7 +27,7 @@
       "settings": {
         "vnext": [
           {
-            "address": "10.50.0.2",
+            "address": "ru-server.tiinservice.online",
             "port": 8443,
             "users": [
               {
