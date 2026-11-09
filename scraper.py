@@ -169,8 +169,8 @@ def parse_maintenance_page(url, session=None):
             current_date = None
 
             content_text = text_block.decode_contents()
-            content_text = re.sub(r'<(p|div|br|u|b|li)[^>]*>', '\n', content_text)
-            content_text = re.sub(r'</(p|div|u|b|li)>', '\n', content_text)
+            content_text = re.sub(r'<(p|div|br|li|h[1-6]|tr)[^>]*>', '\n', content_text)
+            content_text = re.sub(r'</(p|div|li|h[1-6]|tr)>', '\n', content_text)
             content_text = re.sub(r'<[^>]+>', '', content_text)
             
             lines = [html.unescape(line).strip() for line in content_text.split('\n') if line.strip()]
@@ -182,22 +182,23 @@ def parse_maintenance_page(url, session=None):
                 if ("РАЙОН" in text.upper() or 
                     (text.isupper() and len(text) > 3 and not re.search(r'\d', text)) or
                     text.startswith("г. ") or text.startswith("п. ")):
-                    if not re.search(r'(\d{2}:\d{2}|В ГРАФИКЕ)', text):
-                        candidate = text.replace('г. ', '').replace('п. ', '').strip().upper()
+                    if not re.search(r'(\d{1,2}[.:]\d{2}|В ГРАФИКЕ)', text):
+                        candidate = text.replace('г. ', '').replace('п. ', '').strip(' :').strip().upper()
                         if len(candidate) < 50:
                             current_district = candidate
                             continue
 
                 # Date detection
                 date_match = re.search(r'^(\d{1,2})\s+([а-яА-Я]+)', text)
-                if date_match and not re.search(r'\d{2}:\d{2}', text):
+                if date_match and not re.search(r'\d{1,2}[.:]\d{2}', text):
                     current_date = date_match.group(0)
                     continue
 
                 # Entry detection: TIME - ADDRESSES [- REASON]
-                time_match = re.search(r'(\d{2}:\d{2}\s*[-–]\s*\d{2}:\d{2})', text)
+                time_match = re.search(r'(\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2})', text)
                 if time_match and current_district and current_date:
-                    time_range = time_match.group(1).replace(' ', '')
+                    raw_time = time_match.group(1).replace(' ', '').replace('.', ':')
+                    time_range = re.sub(r'[–—]', '-', raw_time)
                     rest = text[time_match.end():].strip()
                     rest = re.sub(r'^[–-—]\s*', '', rest)
 

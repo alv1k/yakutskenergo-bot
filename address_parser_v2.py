@@ -399,11 +399,19 @@ def parse_user_address(street_raw: str, district: Optional[str] = None) -> Parse
             # В микрорайоне номер дома часто идет сразу после номера мкр или слова мкр
             rest_mkr = re.sub(r'\b(?:мкр|микрорайон)\b\.?', ' ', street_part)
             rest_mkr = re.sub(r'\b' + re.escape(mkr_val) + r'\b', ' ', rest_mkr).strip()
-            h_match = re.search(r'(\d+[\w\/-]*)', rest_mkr)
-            if h_match:
-                house_num = h_match.group(1).replace(" ", "")
-                street_part = f"{mkr_val} мкр"
+            h_words = [w for w in rest_mkr.split() if len(w) > 1 and not re.search(r'\d', w)]
+            if h_words:
+                # В адресе есть самостоятельное название улицы внутри микрорайона
+                h_m = re.search(r'(\d+[\w\/-]*)$', rest_mkr)
+                if h_m:
+                    house_num = h_m.group(1).replace(" ", "")
+                    street_part = rest_mkr[:h_m.start()].strip()
+                else:
+                    street_part = rest_mkr
             else:
+                h_match = re.search(r'(\d+[\w\/-]*)', rest_mkr)
+                if h_match:
+                    house_num = h_match.group(1).replace(" ", "")
                 street_part = f"{mkr_val} мкр"
         else:
             # Обычная улица: ищем дом в конце строки, НО с защитой для номерных улиц
@@ -799,7 +807,13 @@ def match_address_detailed(
 
 def _check_street_match(user_core: str, user_canonical: str, grp_street: str, grp_canonical: str, user_mkr: Optional[str], grp_mkr: Optional[str]) -> bool:
     """Проверка эквивалентности названий улиц с учетом синонимов."""
-    if user_mkr and (user_mkr in grp_street or user_mkr in grp_canonical):
+    # Совпадение по микрорайону:
+    # 1) Пользователь подписан на микрорайон целиком (без конкретной улицы)
+    if user_mkr and (not user_core or user_core == user_mkr or user_canonical == user_mkr):
+        if user_mkr in grp_street or user_mkr in grp_canonical:
+            return True
+    # 2) В графике отключен микрорайон целиком
+    if user_mkr and grp_canonical == user_mkr:
         return True
 
     # 1. Прямое совпадение канонических имен

@@ -217,9 +217,14 @@ class TestNotificationDateFiltering(unittest.IsolatedAsyncioTestCase):
     def test_scraper_cache_filters_old_dates(self):
         import scraper
         import tempfile
+        from datetime import datetime
 
-        old_date_entry = {'date': '20 октября', 'time': '09:00-12:00', 'addresses': 'Ленина 1', 'reason': 'старое'}
-        fresh_entry = {'date': '6 ноября', 'time': '09:00-12:00', 'addresses': 'Ленина 1', 'reason': 'новое'}
+        months_rev = {1: 'января', 2: 'февраля', 3: 'марта', 4: 'апреля', 5: 'мая', 6: 'июня', 7: 'июля', 8: 'августа', 9: 'сентября', 10: 'октября', 11: 'ноября', 12: 'декабря'}
+        now = datetime.now()
+        fresh_str = f"{now.day} {months_rev[now.month]}"
+
+        old_date_entry = {'date': '20 октября 2020', 'time': '09:00-12:00', 'addresses': 'Ленина 1', 'reason': 'старое'}
+        fresh_entry = {'date': fresh_str, 'time': '09:00-12:00', 'addresses': 'Ленина 1', 'reason': 'новое'}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_cache = os.path.join(tmpdir, "cache.json")

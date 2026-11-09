@@ -151,10 +151,41 @@ async def process_district_after(update: Update, context: ContextTypes.DEFAULT_T
         )
     return ConversationHandler.END
 
+async def _save_and_forward_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    user_info = f"@{user.username}" if user.username else (user.first_name or "")
+    username = user.username or None
+    admin_text = f"💬 Поддержка от {user_info} (ID: {chat_id}):\n\n{text}"
+
+    ticket_id = database.create_support_ticket(chat_id, text, username)
+    admin_text += f"\n\n#ticket{ticket_id}"
+
+    if ADMIN_TG_ID:
+        try:
+            await context.bot.send_message(chat_id=int(ADMIN_TG_ID), text=admin_text)
+        except Exception as e:
+            logging.error(f"Support forward error: {e}")
+
+    context.user_data.pop('support_mode', None)
+    await update.message.reply_text(
+        f"✅ Ваше сообщение принято как обращение в поддержку (#{ticket_id})!\nМы проверим информацию и ответим вам здесь.",
+        reply_markup=get_main_keyboard()
+    )
+
+async def cmd_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команд /ticket и /support."""
+    if context.args:
+        text = " ".join(context.args).strip()
+        await _save_and_forward_ticket(update, context, text)
+    else:
+        await start_support(update, context)
+
 async def start_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['support_mode'] = True
     await update.message.reply_text(
-        "📩 Напишите ваше сообщение — оно будет отправлено администратору.\n\n"
+        "📩 Напишите ваше сообщение (вопрос, отзыв или неточность в расписании) — оно будет передано в поддержку.\n\n"
         "Для отмены: /cancel или ❌ Отмена",
         reply_markup=ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True)
     )
@@ -167,28 +198,7 @@ async def process_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Отменено.", reply_markup=get_main_keyboard())
         return
 
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-
-    user_info = f"@{user.username}" if user.username else (user.first_name or "")
-    username = user.username or None
-    admin_text = f"💬 Поддержка от {user_info} (ID: {chat_id}):\n\n{text}"
-
-    ticket_id = database.create_support_ticket(chat_id, text, username)
-    admin_text += f"\n\n#ticket{ticket_id}"
-
-    try:
-        await context.bot.send_message(chat_id=int(ADMIN_TG_ID), text=admin_text)
-    except Exception as e:
-        logging.error(f"Support forward error: {e}")
-        await update.message.reply_text("⚠️ Ошибка отправки. Попробуйте позже.", reply_markup=get_main_keyboard())
-        return
-
-    context.user_data.pop('support_mode', None)
-    await update.message.reply_text(
-        "✅ Сообщение отправлено. Ответ придёт сюда.",
-        reply_markup=get_main_keyboard()
-    )
+    await _save_and_forward_ticket(update, context, text)
 
 async def admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != int(ADMIN_TG_ID):
@@ -321,16 +331,30 @@ async def confirm_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    if not text:
+        return
+
+    # Кнопки главного меню
     if text in ("🔍 Проверить сейчас", "➕ Добавить адрес", "➖ Удалить адрес", "📋 Мои адреса", "❓ Справка"):
         context.user_data.pop('support_mode', None)
-    if text == "🔍 Проверить сейчас": await check_now(update, context)
-    elif text == "➕ Добавить адрес": await start_setup(update, context)
-    elif text == "➖ Удалить адрес": await start_remove(update, context)
-    elif text == "📋 Мои адреса": await cmd_list_addresses(update, context)
-    elif text == "❓ Справка": await start(update, context)
-    elif text == "📩 Поддержка": await start_support(update, context)
-    elif context.user_data.get('support_mode'):
-        await process_support(update, context)
+        if text == "🔍 Проверить сейчас": await check_now(update, context)
+        elif text == "➕ Добавить адрес": await start_setup(update, context)
+        elif text == "➖ Удалить адрес": await start_remove(update, context)
+        elif text == "📋 Мои адреса": await cmd_list_addresses(update, context)
+        elif text == "❓ Справка": await start(update, context)
+        return
+
+    if text in ("📩 Поддержка", "поддержка", "тикет", "Поддержка", "Тикет"):
+        await start_support(update, context)
+        return
+
+    if text in ("❌ Отмена", "/cancel"):
+        context.user_data.pop('support_mode', None)
+        await update.message.reply_text("Отменено.", reply_markup=get_main_keyboard())
+        return
+
+    # Принимаем любое сообщение от пользователя как обращение в поддержку
+    await _save_and_forward_ticket(update, context, text)
 
 def validate_address_input(text, field_name="Поле"):
     if not text or not text.strip():
@@ -1200,6 +1224,7 @@ async def post_init(application):
         ("remove", "Удалить адрес"),
         ("list", "Мои адреса"),
         ("check", "Проверить сейчас"),
+        ("ticket", "Написать тикет / поддержка"),
     ])
     try:
         await application.bot.set_my_description(
@@ -1254,6 +1279,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('add', start_setup))
     application.add_handler(CommandHandler('remove', cmd_remove_address))
     application.add_handler(CommandHandler('check', check_now))
+    application.add_handler(CommandHandler(['ticket', 'support'], cmd_ticket))
     application.add_handler(CallbackQueryHandler(confirm_remove, pattern=r'^remove_'))
     application.add_handler(conv_handler)
     application.add_handler(MessageHandler(
